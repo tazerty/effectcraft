@@ -186,6 +186,25 @@ pub fn session() -> Session {
     }
 }
 
+/// Evora (E3): an Evora interface language (`?lang=`, one of the platform's 14 codes) as the
+/// engine's catalog code. `zh-Hans` (also `zh-cn`, `zh`) → `zh-hans`; fr, de, es, ru, ja and en
+/// keep their code; ar, hi, id, it, ko and tr, which the engine has no catalog for, → `en` (the
+/// Evora shell shows its banner). `pt` → none: the variant (Brazilian or not) awaits decision
+/// D-23, so the engine keeps its default. Anything else → none.
+fn evora_language(code: &str) -> Option<&'static str> {
+    match code.trim().to_ascii_lowercase().as_str() {
+        "en" => Some("en"),
+        "fr" => Some("fr"),
+        "de" => Some("de"),
+        "es" => Some("es"),
+        "ru" => Some("ru"),
+        "ja" => Some("ja"),
+        "zh-hans" | "zh-cn" | "zh" => Some("zh-hans"),
+        "ar" | "hi" | "id" | "it" | "ko" | "tr" => Some("en"),
+        _ => None,
+    }
+}
+
 /// Browser file pickers in place of the desktop's file dialogs.
 fn install_hooks(app: &mut EffectcraftApp) {
     app.hooks.pick_files = Some(Box::new(|exts: &[&str]| {
@@ -266,6 +285,11 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 }
                 let mut session = session();
                 session.load_settings();
+                // Evora (E3): the interface language imposed by the host page (`?lang=`), set
+                // before the first frame so the editor never shows English first. Not saved.
+                if let Some(language) = query_value("lang").as_deref().and_then(evora_language) {
+                    session.prefs.general.language = language.to_string();
+                }
                 let recovery = session.begin_recovery();
                 // `?empty`: a blank project; `?demo`: the demo project; otherwise the last visit's
                 // project (the demo on a first visit).

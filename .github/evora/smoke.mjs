@@ -33,6 +33,8 @@ const settleMs = Number(opt.settle || 5000);
 const termsMode = opt.terms || "measure";
 // `--links=block` (patch E7): Help links run inside the engine must open no page and log no error.
 const linksMode = opt.links || "off";
+// `--expect-lang=fr` (patch E3): the engine was framed with `?lang=fr`: its menus must start translated.
+const expectLang = opt["expect-lang"] || "";
 const LANGUAGES = ["en", "ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
 const BRAND = /artcraft|discord\.gg|getartcraft/i;
 const EMOJI = /\p{Emoji_Presentation}|\u{FE0F}|\u{20E3}/u;
@@ -256,6 +258,9 @@ try {
     // What the engine draws: the menus in every catalog language and the widgets on screen.
     const labels = [];
     const perLanguage = {};
+    const menuLabels = () => evalIn(ctx, `window.effectcraft.request("ui.menu.list", {}).then((r) => r.map((i) => String(i.label ?? "")))`, true, 60000);
+    const initialLabels = expectLang ? await menuLabels() : null;
+    let englishLabels = null;
     for (const lang of LANGUAGES) {
       await evalIn(ctx, `window.effectcraft.execute("prefs.set", { key: "general.language", value: ${JSON.stringify(lang === "en" ? "en" : lang)} })`, true, 30000).catch((e) =>
         warnings.push(`prefs.set ${lang}: ${e.message}`),
@@ -267,9 +272,15 @@ try {
         for (const seg of it.path || []) texts.push(String(seg));
       }
       perLanguage[lang] = texts.length;
+      if (lang === "en") englishLabels = (items || []).map((it) => String(it.label ?? ""));
       labels.push(...texts.map((t) => [lang, t, "menu"]));
     }
     await evalIn(ctx, `window.effectcraft.execute("prefs.set", { key: "general.language", value: "system" })`, true, 30000).catch(() => {});
+    if (expectLang) {
+      const differ = (initialLabels || []).filter((l, i) => englishLabels && l !== englishLabels[i]).length;
+      report.lang = { expected: expectLang, labels: (initialLabels || []).length, translatedAtStart: differ, sample: (initialLabels || []).slice(0, 8) };
+      check(differ >= 20, `langue imposée « ${expectLang} » absente au démarrage (${differ} libellés traduits)`);
+    }
     if (linksMode === "block") {
       const pages = async () => (await send("Target.getTargets")).targetInfos.filter((x) => x.type === "page").length;
       const before = await pages();
@@ -325,7 +336,7 @@ try {
   const l = report.load || {};
   const r = report.render || {};
   console.log(
-    `SMOKE label=${label} ok=${report.ok} links=${report.links ? `${report.links.pagesBefore}->${report.links.pagesAfter}/${report.links.errorsDuring.length}` : "-"} chrome="${report.chrome}" wall_ready_ms=${report.wallReadyMs} wasm_ms=${l.wasmMs !== undefined ? Math.round(l.wasmMs) : "-"} ready_ms=${l.readyMs !== undefined ? Math.round(l.readyMs) : "-"} backend=${report.info ? JSON.stringify(report.info.backend ?? null) : "-"} webgpu=${report.info ? report.info.webgpu : "-"} errors=${errors.length} csp=${issues.length} texts=${r.texts ?? "-"} brand=${r.brand ? r.brand.length : "-"} emoji=${r.emoji ? r.emoji.length : "-"} terms=${r.termsCount ?? "-"}`,
+    `SMOKE label=${label} ok=${report.ok} lang=${report.lang ? `${report.lang.expected}:${report.lang.translatedAtStart}` : "-"} links=${report.links ? `${report.links.pagesBefore}->${report.links.pagesAfter}/${report.links.errorsDuring.length}` : "-"} chrome="${report.chrome}" wall_ready_ms=${report.wallReadyMs} wasm_ms=${l.wasmMs !== undefined ? Math.round(l.wasmMs) : "-"} ready_ms=${l.readyMs !== undefined ? Math.round(l.readyMs) : "-"} backend=${report.info ? JSON.stringify(report.info.backend ?? null) : "-"} webgpu=${report.info ? report.info.webgpu : "-"} errors=${errors.length} csp=${issues.length} texts=${r.texts ?? "-"} brand=${r.brand ? r.brand.length : "-"} emoji=${r.emoji ? r.emoji.length : "-"} terms=${r.termsCount ?? "-"}`,
   );
   for (const e of errors.slice(0, 30)) console.log(`SMOKE_ERROR ${e}`);
   for (const i of issues.slice(0, 10)) console.log(`SMOKE_CSP ${i}`);
@@ -347,6 +358,7 @@ try {
       `| Erreurs de page / violations CSP | ${errors.length} / ${issues.length} |`,
       `| Libellés relus au rendu (menus × ${LANGUAGES.length} langues + écran) | ${r.texts ?? "-"} |`,
       `| Marques / émojis / termes sensibles au rendu | ${r.brand ? r.brand.length : "-"} / ${r.emoji ? r.emoji.length : "-"} / ${r.termsCount ?? "-"} (${termsMode === "block" ? "bloquant" : "mesure"}) |`,
+      `| Langue imposée (E3) | ${report.lang ? `${report.lang.expected} : ${report.lang.translatedAtStart} libellés de menu traduits dès le démarrage sur ${report.lang.labels}` : "non vérifiée"} |`,
       `| Liens externes (E7 : 4 commandes Help) | ${report.links ? `pages ${report.links.pagesBefore} -> ${report.links.pagesAfter}, erreurs ${report.links.errorsDuring.length}` : "non vérifié"} |`,
       "",
     ];
