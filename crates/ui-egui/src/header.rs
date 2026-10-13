@@ -1,5 +1,8 @@
-//! The Tools bar: home, the tool slots, tool options, snapping, workspaces and the community
-//! buttons (Discord is always one click away).
+//! The Tools bar: home, the tool slots, tool options, snapping and workspaces.
+//!
+//! Evora (E1, E7): this build carries no ArtCraft mark and no community buttons (Discord,
+//! website, GitHub): a modified build must drop the ArtCraft marks (docs/brand/LICENSE-brand.txt)
+//! and the Evora shell owns every external link.
 
 use crate::i18n::{tr, tr_args};
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -182,32 +185,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let label = p.text(pos2(snap.max.x + 4.0, cy), Align2::LEFT_CENTER, tr("Snapping"), Tokens::ui(12.0), t.text_dim);
     snapping_options(app, ui, Rect::from_min_size(pos2(label.max.x + 2.0, cy - 9.0), vec2(18.0, 18.0)));
 
-    // Right side: community buttons, workspaces.
+    // Right side: workspaces (Evora E1/E7: no community buttons).
     let mut rx = rect.max.x - 10.0;
-    // The pill fits its label (icon, gap, text) with even padding: it was a fixed 104 px with the
-    // text at its left, which left a wide gap on the right (#581).
-    let label = p.layout_no_wrap(tr("Discord").to_string(), Tokens::semibold(12.0), Color32::WHITE);
-    let discord = Rect::from_min_max(pos2(rx - (10.0 + 14.0 + 6.0 + label.size().x + 12.0), cy - 13.0), pos2(rx, cy + 13.0));
-    let dresp = ui.interact(discord, egui::Id::new("hdr-discord"), Sense::click());
-    let dc = Color32::from_rgb(0x58, 0x65, 0xf2);
-    p.rect_filled(discord, 13.0, if dresp.hovered() { dc.gamma_multiply(1.2) } else { dc });
-    icons::paint(&p, Rect::from_center_size(pos2(discord.min.x + 17.0, cy), vec2(14.0, 14.0)), Icon::Chat, Color32::WHITE);
-    p.galley(pos2(discord.min.x + 30.0, cy - label.size().y / 2.0), label, Color32::WHITE);
-    app.auto.add("header.discord", discord, "Join the ArtCraft Discord");
-    if dresp.on_hover_text(tr("Join the ArtCraft community on Discord")).clicked() {
-        let _ = app.session.execute("help.discord", json!({}));
-    }
-    rx = discord.min.x - 6.0;
-    for (id, icon, tip, cmd) in
-        [("hdr-github", Icon::Code, "EffectCraft on GitHub", "help.github"), ("hdr-web", Icon::Globe, "EffectCraft on getartcraft.com", "help.appPage")]
-    {
-        let r = Rect::from_min_max(pos2(rx - 26.0, cy - 13.0), pos2(rx, cy + 13.0));
-        if widgets::icon_button(ui, r, icon, false, &t, egui::Id::new(id)).on_hover_text(tip).clicked() {
-            let _ = app.session.execute(cmd, json!({}));
-        }
-        app.auto.add(&format!("header.{}", &id[4..]), r, tip);
-        rx = r.min.x - 4.0;
-    }
     // Appearance: Sync with System, Light, Dark (a monitor, sun or moon), one click to the next.
     let (icon, mode) = match app.session.prefs.appearance.appearance_mode.as_str() {
         "auto" => (Icon::Monitor, tr("Sync with System")),
@@ -654,26 +633,21 @@ fn ws_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The ArtCraft mark as supplied in `docs/brand` (the README's and getartcraft.com's logo; used
-/// unmodified, see `docs/brand/LICENSE-brand.txt`).
-static ARTCRAFT_MARK: &[u8] = include_bytes!("../../../docs/brand/artcraft-mark.png");
-
-/// The ArtCraft mark in `r` (decoded once into a mipmapped texture, so it stays crisp from the
-/// 24 px Tools bar to the About dialog). Nothing is drawn if it can't be decoded.
+/// Evora (E1): a neutral mark drawn from shapes (three stacked layers on an indigo tile), in place
+/// of the ArtCraft mark that a modified build must not carry (docs/brand/LICENSE-brand.txt). It
+/// keeps the former signature, so the Tools bar and the About dialog are unchanged.
 pub fn paint_logo(p: &egui::Painter, r: Rect) {
-    let ctx = p.ctx();
-    let id = egui::Id::new("artcraft-mark");
-    let tex = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(id)).unwrap_or_else(|| {
-        let tex = image::load_from_memory_with_format(ARTCRAFT_MARK, image::ImageFormat::Png).ok().map(|img| {
-            let img = img.to_rgba8();
-            let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
-            ctx.load_texture("artcraft-mark", ci, egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear)))
-        });
-        ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
-        tex
-    });
-    if let Some(t) = tex {
-        p.image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    let s = r.width().min(r.height());
+    if s <= 0.0 {
+        return;
+    }
+    let c = r.center();
+    p.rect_filled(Rect::from_center_size(c, vec2(s, s)), s * 0.22, Color32::from_rgb(0x4f, 0x46, 0xe5));
+    let (hw, hh, step) = (s * 0.30, s * 0.13, s * 0.14);
+    for (k, alpha) in [(1.0_f32, 110_u8), (0.0, 170), (-1.0, 255)] {
+        let y = c.y + k * step;
+        let diamond = vec![pos2(c.x, y - hh), pos2(c.x + hw, y), pos2(c.x, y + hh), pos2(c.x - hw, y)];
+        p.add(egui::Shape::convex_polygon(diamond, Color32::from_white_alpha(alpha), Stroke::NONE));
     }
 }
 
