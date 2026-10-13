@@ -50,6 +50,9 @@ env:
   # Termes sensibles (Lumetri, Lightroom, Acrobat, Premiere, Adobe, Cycore) : bloquants depuis E9
   # (EVORA-KIN-08), dans les chaînes affichées après le catalogue de surcharge et au rendu.
   EVORA_TERMS_GATE: "block"
+  # Liens externes lancés dans le moteur (commandes Help) : aucune page ouverte, aucune erreur,
+  # bloquant depuis E7 (EVORA-KIN-09).
+  EVORA_LINKS_GATE: "block"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
@@ -313,9 +316,9 @@ jobs:
           echo "CSP prévue : $csp"
           rc=0
           node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-$PA.html" --engine="http://127.0.0.1:$PA" \
-            --label=cross-origin --out="$smoke" --terms="$EVORA_TERMS_GATE" || rc=1
+            --label=cross-origin --out="$smoke" --terms="$EVORA_TERMS_GATE" --links="$EVORA_LINKS_GATE" || rc=1
           node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-$PC.html" --engine="http://127.0.0.1:$PC" \
-            --label=csp --out="$smoke" --terms="$EVORA_TERMS_GATE" || rc=1
+            --label=csp --out="$smoke" --terms="$EVORA_TERMS_GATE" --links="$EVORA_LINKS_GATE" || rc=1
           # Témoin saboté : sous une empreinte CSP fausse le moteur ne doit pas démarrer, et le test le dit.
           if node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-$PS.html" --engine="http://127.0.0.1:$PS" \
             --label=csp-sabotage --out="$smoke" --timeout=30000 --settle=500 > "$smoke/sabotage.out" 2>&1; then

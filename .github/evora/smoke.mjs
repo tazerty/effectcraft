@@ -31,6 +31,8 @@ const out = opt.out || join(tmpdir(), "evora-smoke");
 const timeoutMs = Number(opt.timeout || 240000);
 const settleMs = Number(opt.settle || 5000);
 const termsMode = opt.terms || "measure";
+// `--links=block` (patch E7): Help links run inside the engine must open no page and log no error.
+const linksMode = opt.links || "off";
 const LANGUAGES = ["en", "ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
 const BRAND = /artcraft|discord\.gg|getartcraft/i;
 const EMOJI = /\p{Emoji_Presentation}|\u{FE0F}|\u{20E3}/u;
@@ -268,6 +270,19 @@ try {
       labels.push(...texts.map((t) => [lang, t, "menu"]));
     }
     await evalIn(ctx, `window.effectcraft.execute("prefs.set", { key: "general.language", value: "system" })`, true, 30000).catch(() => {});
+    if (linksMode === "block") {
+      const pages = async () => (await send("Target.getTargets")).targetInfos.filter((x) => x.type === "page").length;
+      const before = await pages();
+      const errBefore = errors.length;
+      for (const cmd of ["help.github", "help.docs", "help.reportIssue", "help.onlineTutorials"]) {
+        await evalIn(ctx, `window.effectcraft.execute(${JSON.stringify(cmd)}, {})`, true, 30000).catch((e) => warnings.push(`${cmd}: ${e.message}`));
+      }
+      await sleep(2000);
+      const after = await pages();
+      report.links = { commands: 4, pagesBefore: before, pagesAfter: after, errorsDuring: errors.slice(errBefore) };
+      check(after === before, `un lien externe a ouvert une page (${before} -> ${after})`);
+      check(errors.length === errBefore, `erreur(s) en ouvrant les liens externes : ${JSON.stringify(errors.slice(errBefore))}`);
+    }
     const elements = await evalIn(ctx, `window.effectcraft.request("ui.elements", {}).then((r) => JSON.parse(JSON.stringify(r)))`, true, 60000).catch((e) => {
       warnings.push(`ui.elements: ${e.message}`);
       return [];
@@ -310,7 +325,7 @@ try {
   const l = report.load || {};
   const r = report.render || {};
   console.log(
-    `SMOKE label=${label} ok=${report.ok} chrome="${report.chrome}" wall_ready_ms=${report.wallReadyMs} wasm_ms=${l.wasmMs !== undefined ? Math.round(l.wasmMs) : "-"} ready_ms=${l.readyMs !== undefined ? Math.round(l.readyMs) : "-"} backend=${report.info ? JSON.stringify(report.info.backend ?? null) : "-"} webgpu=${report.info ? report.info.webgpu : "-"} errors=${errors.length} csp=${issues.length} texts=${r.texts ?? "-"} brand=${r.brand ? r.brand.length : "-"} emoji=${r.emoji ? r.emoji.length : "-"} terms=${r.termsCount ?? "-"}`,
+    `SMOKE label=${label} ok=${report.ok} links=${report.links ? `${report.links.pagesBefore}->${report.links.pagesAfter}/${report.links.errorsDuring.length}` : "-"} chrome="${report.chrome}" wall_ready_ms=${report.wallReadyMs} wasm_ms=${l.wasmMs !== undefined ? Math.round(l.wasmMs) : "-"} ready_ms=${l.readyMs !== undefined ? Math.round(l.readyMs) : "-"} backend=${report.info ? JSON.stringify(report.info.backend ?? null) : "-"} webgpu=${report.info ? report.info.webgpu : "-"} errors=${errors.length} csp=${issues.length} texts=${r.texts ?? "-"} brand=${r.brand ? r.brand.length : "-"} emoji=${r.emoji ? r.emoji.length : "-"} terms=${r.termsCount ?? "-"}`,
   );
   for (const e of errors.slice(0, 30)) console.log(`SMOKE_ERROR ${e}`);
   for (const i of issues.slice(0, 10)) console.log(`SMOKE_CSP ${i}`);
@@ -332,6 +347,7 @@ try {
       `| Erreurs de page / violations CSP | ${errors.length} / ${issues.length} |`,
       `| Libellés relus au rendu (menus × ${LANGUAGES.length} langues + écran) | ${r.texts ?? "-"} |`,
       `| Marques / émojis / termes sensibles au rendu | ${r.brand ? r.brand.length : "-"} / ${r.emoji ? r.emoji.length : "-"} / ${r.termsCount ?? "-"} (${termsMode === "block" ? "bloquant" : "mesure"}) |`,
+      `| Liens externes (E7 : 4 commandes Help) | ${report.links ? `pages ${report.links.pagesBefore} -> ${report.links.pagesAfter}, erreurs ${report.links.errorsDuring.length}` : "non vérifié"} |`,
       "",
     ];
     if (report.failures.length) rows.push(...report.failures.map((f) => `- échec : ${f}`), "");
