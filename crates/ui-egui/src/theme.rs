@@ -347,9 +347,34 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
             stack.push("jbmono".into());
         }
     }
+    order_text_faces_before_emoji(&mut fonts);
     install_script_fallbacks(&mut fonts, language);
     ctx.set_fonts(fonts);
     apply_visuals(ctx, t);
+}
+
+/// egui's emoji faces (default fonts): kept for emoji typed in user content.
+const EMOJI_FACES: [&str; 2] = ["NotoEmoji-Regular", "emoji-icon-font"];
+
+/// Evora (E10, zero emoji in the interface): every family lists its text faces (Inter, Ubuntu
+/// Light, JetBrains Mono, Hack) before the emoji faces, so a symbol a text face draws (✓ ▸ ★ ⇄ …)
+/// never falls through to Noto Emoji or the emoji icon font; those stay last, for user content.
+/// Proportional gains Hack and Monospace gains Inter ahead of the emoji faces. The CI audit of the
+/// catalogues (.github/evora/gates.py, stacks `evora`) resolves each character through this order.
+fn order_text_faces_before_emoji(fonts: &mut FontDefinitions) {
+    let have_hack = fonts.font_data.contains_key("Hack");
+    let have_inter = fonts.font_data.contains_key("inter");
+    for (family, stack) in &mut fonts.families {
+        if *family == FontFamily::Proportional && have_hack && !stack.iter().any(|f| f == "Hack") {
+            stack.push("Hack".into());
+        }
+        if *family == FontFamily::Monospace && have_inter && !stack.iter().any(|f| f == "inter") {
+            stack.push("inter".into());
+        }
+        let (text, emoji): (Vec<String>, Vec<String>) = std::mem::take(stack).into_iter().partition(|f| !EMOJI_FACES.contains(&f.as_str()));
+        stack.extend(text);
+        stack.extend(emoji);
+    }
 }
 
 /// Scripts the bundled fonts lack beyond CJK, each probed with one of its letters: names typed in
