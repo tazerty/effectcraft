@@ -2136,10 +2136,12 @@ pub(crate) fn dyn_ctx<'a>(workspace: &'a str, saved_workspaces: &'a [String]) ->
     effectcraft_engine::menus::DynCtx { workspace: Some(workspace), saved_workspaces }
 }
 
-/// The check-mark column every menu row reserves (like macOS / After Effects menus).
+/// The check-mark column every menu row reserves (like macOS / After Effects menus). Evora (E10):
+/// U+2713 CHECK MARK, drawn by Inter, rather than U+2714 HEAVY CHECK MARK, an emoji that only the
+/// emoji faces carry.
 fn gutter(checked: bool) -> egui::Atom<'static> {
     use egui::AtomExt;
-    (if checked { "✔" } else { "" }).atom_size(egui::vec2(14.0, 14.0))
+    (if checked { "\u{2713}" } else { "" }).atom_size(egui::vec2(14.0, 14.0))
 }
 
 fn menu_entry(app: &EffectcraftApp, ui: &mut egui::Ui, e: &MenuEntry) -> egui::Response {
