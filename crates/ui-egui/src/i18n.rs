@@ -161,6 +161,24 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
     }
     // Undo/redo names come from the history, so they are formatted per language here rather than
     // looked up in a catalog. An English (or untranslated) interface keeps the shown label.
+    // Evora (E3): French, German and Russian have a menu catalog but no history wording; their
+    // fixed labels are translated below, the undo/redo entries stay as the engine shows them
+    // (upstream returned every label of these three languages in English).
+    if matches!(language(app), "fr" | "de" | "ru") {
+        return match e.command.as_str() {
+            "edit.undo" | "edit.redo" => shown,
+            "window.panel" => {
+                let prefix = format!("{}: ", e.label);
+                if let Some(name) = shown.strip_prefix(&prefix) {
+                    format!("{}: {name}", label(app, &e.command, &e.label))
+                } else {
+                    label(app, &e.command, &shown).into()
+                }
+            }
+            _ if shown == e.label => label(app, &e.command, &e.label).into(),
+            _ => shown,
+        };
+    }
     let (undo, no_undo, redo, no_redo) = match language(app) {
         "ja" => ("取り消し", "取り消しできません", "やり直し", "やり直しできません"),
         "zh-hans" => ("撤销", "无可撤销的操作", "重做", "无可重做的操作"),
