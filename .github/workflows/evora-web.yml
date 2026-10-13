@@ -300,8 +300,8 @@ jobs:
           <body style="margin:0"><iframe id="engine" src="http://127.0.0.1:$PA/index.html?nosw&amp;storageNs=ci-a" style="border:0;width:1360px;height:860px" sandbox="allow-scripts allow-same-origin"></iframe></body></html>
           HTML
           for p in "$PA" "$PC" "$PS"; do
-            # La passe sous CSP impose aussi la langue (E3, ?lang=fr).
-            if [ "$p" = "$PC" ]; then extra="&amp;lang=fr"; else extra=""; fi
+            # La passe sous CSP impose aussi la langue (E3, ?lang=fr) et le thème (E2, ?theme=light).
+            if [ "$p" = "$PC" ]; then extra="&amp;lang=fr&amp;theme=light"; else extra=""; fi
             cat > "$smoke/parent/engine-$p.html" <<HTML
           <!doctype html>
           <html><head><meta charset="utf-8"><title>Evora smoke parent</title><link rel="icon" href="data:,"></head>
@@ -326,7 +326,7 @@ jobs:
           node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-$PA.html" --engine="http://127.0.0.1:$PA" \
             --label=cross-origin --out="$smoke" --terms="$EVORA_TERMS_GATE" --links="$EVORA_LINKS_GATE" || rc=1
           node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-$PC.html" --engine="http://127.0.0.1:$PC" \
-            --label=csp --out="$smoke" --terms="$EVORA_TERMS_GATE" --links="$EVORA_LINKS_GATE" --expect-lang=fr || rc=1
+            --label=csp --out="$smoke" --terms="$EVORA_TERMS_GATE" --links="$EVORA_LINKS_GATE" --expect-lang=fr --expect-theme=light || rc=1
           # Espace de noms du stockage (E5) : magasins préfixés, magasins étrangers purgés au redémarrage.
           node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-ns.html" --engine="http://127.0.0.1:$PA" \
             --label=storage-ns --out="$smoke" --terms="$EVORA_TERMS_GATE" --storage-check=ci-a || rc=1

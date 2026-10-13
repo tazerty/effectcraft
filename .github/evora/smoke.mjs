@@ -39,6 +39,8 @@ const expectLang = opt["expect-lang"] || "";
 // storage: its stores must carry the namespace, and stores of another namespace (or of none),
 // seeded here, must be gone once the engine starts again.
 const storageNs = opt["storage-check"] || "";
+// `--expect-theme=light` (patch E2): the engine was framed with `?theme=light`.
+const expectTheme = opt["expect-theme"] || "";
 const LANGUAGES = ["en", "ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
 const BRAND = /artcraft|discord\.gg|getartcraft/i;
 const EMOJI = /\p{Emoji_Presentation}|\u{FE0F}|\u{20E3}/u;
@@ -280,6 +282,12 @@ try {
       labels.push(...texts.map((t) => [lang, t, "menu"]));
     }
     await evalIn(ctx, `window.effectcraft.execute("prefs.set", { key: "general.language", value: "system" })`, true, 30000).catch(() => {});
+    if (expectTheme) {
+      const inspect = await evalIn(ctx, `window.effectcraft.request("ui.inspect", {}).then((r) => JSON.parse(JSON.stringify(r)))`, true, 60000);
+      const theme = String(inspect && inspect.ui ? inspect.ui.theme : "");
+      report.theme = { expected: expectTheme, shown: theme };
+      check(theme.toLowerCase() === expectTheme, `thème imposé « ${expectTheme} » absent (thème affiché « ${theme} »)`);
+    }
     if (expectLang) {
       const differ = (initialLabels || []).filter((l, i) => englishLabels && l !== englishLabels[i]).length;
       report.lang = { expected: expectLang, labels: (initialLabels || []).length, translatedAtStart: differ, sample: (initialLabels || []).slice(0, 8) };
@@ -382,7 +390,7 @@ try {
   const l = report.load || {};
   const r = report.render || {};
   console.log(
-    `SMOKE label=${label} ok=${report.ok} storage=${report.storage ? `${report.storage.backend}:${JSON.stringify(report.storage.first.opfs)}->${JSON.stringify(report.storage.after && report.storage.after.opfs)}` : "-"} lang=${report.lang ? `${report.lang.expected}:${report.lang.translatedAtStart}` : "-"} links=${report.links ? `${report.links.pagesBefore}->${report.links.pagesAfter}/${report.links.errorsDuring.length}` : "-"} chrome="${report.chrome}" wall_ready_ms=${report.wallReadyMs} wasm_ms=${l.wasmMs !== undefined ? Math.round(l.wasmMs) : "-"} ready_ms=${l.readyMs !== undefined ? Math.round(l.readyMs) : "-"} backend=${report.info ? JSON.stringify(report.info.backend ?? null) : "-"} webgpu=${report.info ? report.info.webgpu : "-"} errors=${errors.length} csp=${issues.length} texts=${r.texts ?? "-"} brand=${r.brand ? r.brand.length : "-"} emoji=${r.emoji ? r.emoji.length : "-"} terms=${r.termsCount ?? "-"}`,
+    `SMOKE label=${label} ok=${report.ok} theme=${report.theme ? report.theme.shown : "-"} storage=${report.storage ? `${report.storage.backend}:${JSON.stringify(report.storage.first.opfs)}->${JSON.stringify(report.storage.after && report.storage.after.opfs)}` : "-"} lang=${report.lang ? `${report.lang.expected}:${report.lang.translatedAtStart}` : "-"} links=${report.links ? `${report.links.pagesBefore}->${report.links.pagesAfter}/${report.links.errorsDuring.length}` : "-"} chrome="${report.chrome}" wall_ready_ms=${report.wallReadyMs} wasm_ms=${l.wasmMs !== undefined ? Math.round(l.wasmMs) : "-"} ready_ms=${l.readyMs !== undefined ? Math.round(l.readyMs) : "-"} backend=${report.info ? JSON.stringify(report.info.backend ?? null) : "-"} webgpu=${report.info ? report.info.webgpu : "-"} errors=${errors.length} csp=${issues.length} texts=${r.texts ?? "-"} brand=${r.brand ? r.brand.length : "-"} emoji=${r.emoji ? r.emoji.length : "-"} terms=${r.termsCount ?? "-"}`,
   );
   for (const e of errors.slice(0, 30)) console.log(`SMOKE_ERROR ${e}`);
   for (const i of issues.slice(0, 10)) console.log(`SMOKE_CSP ${i}`);
@@ -404,6 +412,7 @@ try {
       `| Erreurs de page / violations CSP | ${errors.length} / ${issues.length} |`,
       `| Libellés relus au rendu (menus × ${LANGUAGES.length} langues + écran) | ${r.texts ?? "-"} |`,
       `| Marques / émojis / termes sensibles au rendu | ${r.brand ? r.brand.length : "-"} / ${r.emoji ? r.emoji.length : "-"} / ${r.termsCount ?? "-"} (${termsMode === "block" ? "bloquant" : "mesure"}) |`,
+      `| Thème imposé (E2) | ${report.theme ? `${report.theme.expected} : ${report.theme.shown}` : "non vérifié"} |`,
       `| Langue imposée (E3) | ${report.lang ? `${report.lang.expected} : ${report.lang.translatedAtStart} libellés de menu traduits dès le démarrage sur ${report.lang.labels}` : "non vérifiée"} |`,
       `| Espace de noms du stockage (E5) | ${report.storage ? `« ${report.storage.ns} », ${report.storage.backend} ; au démarrage OPFS ${JSON.stringify(report.storage.first.opfs)}, IndexedDB ${JSON.stringify(report.storage.first.idb)} ; après amorçage et rechargement OPFS ${JSON.stringify(report.storage.after && report.storage.after.opfs)}, IndexedDB ${JSON.stringify(report.storage.after && report.storage.after.idb)}` : "non vérifié"} |`,
       `| Liens externes (E7 : 4 commandes Help) | ${report.links ? `pages ${report.links.pagesBefore} -> ${report.links.pagesAfter}, erreurs ${report.links.errorsDuring.length}` : "non vérifié"} |`,

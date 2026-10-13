@@ -285,6 +285,11 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 if let Some(language) = query_value("lang").as_deref().and_then(evora_language) {
                     session.prefs.general.language = language.to_string();
                 }
+                // Evora (E2): the light or dark appearance imposed by the host page
+                // (`?theme=light|dark`), before the first frame. Not saved.
+                if let Some(mode) = query_value("theme").filter(|m| m == "light" || m == "dark") {
+                    session.prefs.appearance.appearance_mode = mode;
+                }
                 let recovery = session.begin_recovery();
                 // `?empty`: a blank project; `?demo`: the demo project; otherwise the last visit's
                 // project (the demo on a first visit).
