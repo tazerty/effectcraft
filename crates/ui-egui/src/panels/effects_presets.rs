@@ -185,7 +185,8 @@ fn effect_row(
         lp.rect_filled(r, 0.0, t.hover);
     }
     icons::paint(lp, Rect::from_center_size(pos2(r.min.x + 44.0 + indent, r.center().y), vec2(12.0, 12.0)), Icon::Fx, t.text_dim);
-    highlighted(lp, pos2(r.min.x + 56.0 + indent, r.center().y), e.name, query, &t);
+    // Evora (E9): the effect's name as the interface shows it (display-name overrides).
+    highlighted(lp, pos2(r.min.x + 56.0 + indent, r.center().y), &crate::i18n::neutral(e.name), query, &t);
     if e.float {
         lp.text(pos2(r.max.x - 10.0, r.center().y), Align2::RIGHT_CENTER, "32", Tokens::ui(9.5), t.text_faint);
     }
@@ -423,7 +424,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     {
         let name = effectcraft_engine::effects::find(id).map(|e| e.name).unwrap_or("");
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dnd-fx")));
-        let g = painter.layout_no_wrap(name.to_string(), Tokens::ui(12.0), t.text);
+        let g = painter.layout_no_wrap(crate::i18n::neutral(name).into_owned(), Tokens::ui(12.0), t.text);
         let r = Rect::from_min_size(pos + vec2(12.0, 8.0), g.size() + vec2(16.0, 8.0));
         painter.rect_filled(r, 4.0, Color32::from_rgba_premultiplied(40, 40, 40, 230));
         painter.rect_stroke(r, 4.0, Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);

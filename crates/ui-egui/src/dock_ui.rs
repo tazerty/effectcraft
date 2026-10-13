@@ -206,7 +206,8 @@ impl EffectcraftApp {
         let titles = self.tab_titles();
         let decos = self.tab_decos();
         let docs = self.tab_docs();
-        let title = |p: PanelKind| titles.iter().find(|(k, _)| *k == p).map(|(_, s)| s.clone()).unwrap_or_else(|| p.title().to_string());
+        // Evora (E9): a panel's own title goes through the display-name overrides.
+        let title = |p: PanelKind| titles.iter().find(|(k, _)| *k == p).map(|(_, s)| s.clone()).unwrap_or_else(|| crate::i18n::neutral(p.title()).into_owned());
         let info = dock::TabInfo { title: &title, decos: &decos, docs: &docs };
         // Where each group's tabs are (tab drags show where a tab will land between them).
         let mut tab_rects: Vec<(String, Vec<(PanelKind, Rect)>)> = vec![];
@@ -567,7 +568,7 @@ impl EffectcraftApp {
             }
         }
         // Ghost of the dragged tab.
-        let g = painter.layout_no_wrap(p.title().to_string(), crate::theme::Tokens::ui(12.0), Color32::WHITE);
+        let g = painter.layout_no_wrap(crate::i18n::neutral(p.title()).into_owned(), crate::theme::Tokens::ui(12.0), Color32::WHITE);
         let gr = Rect::from_min_size(pos + vec2(12.0, 10.0), g.size() + vec2(16.0, 8.0));
         painter.rect_filled(gr, 4.0, t.focus.gamma_multiply(0.85));
         painter.galley(gr.min + vec2(8.0, 4.0), g, Color32::WHITE);
