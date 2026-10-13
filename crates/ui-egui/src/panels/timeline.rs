@@ -2644,7 +2644,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         ctx.data_mut(|d| d.insert_temp(group_rename_id(), (layer.id.0, *uid, buf)));
                     }
                 } else {
-                    lp.text(pos2(indent + 10.0, cy), Align2::LEFT_CENTER, &shown, Tokens::ui(12.0), t.text);
+                    lp.text(pos2(indent + 10.0, cy), Align2::LEFT_CENTER, crate::i18n::neutral(&shown), Tokens::ui(12.0), t.text);
                 }
                 text_anim_popups(app, ui, &lp, layer, *uid, cw.switches, cy, &mut actions);
                 shape_add_popup(app, ui, &lp, layer, *uid, cw.switches, cy, &mut actions);

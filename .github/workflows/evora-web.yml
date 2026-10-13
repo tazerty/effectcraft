@@ -16,8 +16,8 @@
 #   fichiers d'hébergement absents ; marques ArtCraft absentes du site ; .br/.gz vérifiés ;
 #   empreintes CSP des scripts inline (csp-hashes.txt) ; test de fumée Chrome (iframe d'une autre
 #   origine, puis sous la CSP prévue, plus un témoin saboté qui doit échouer). L'audit des émojis
-#   des catalogues (E10) et les termes sensibles relus au rendu (E9) sont mesurés jusqu'à leur
-#   patch, qui les rend bloquants (variables EVORA_* ci-dessous).
+#   des catalogues (E10, EVORA-KIN-06) et les termes sensibles (E9, EVORA-KIN-08), mesurés
+#   jusqu'à leur patch, sont bloquants depuis (variables EVORA_* ci-dessous).
 # - L'artefact n'est envoyé qu'après toutes les portes : un artefact publié a passé les portes. Il
 #   porte le nom Evora (evora-kinetika-web-<tag>) depuis EVORA-KIN-07, une fois E1 posé et les
 #   portes vertes, jamais avant.
@@ -47,8 +47,9 @@ env:
   EVORA_FONT_STACKS: "evora"
   # Audit des émojis des catalogues : bloquant depuis E10 (EVORA-KIN-06).
   EVORA_EMOJI_GATE: "block"
-  # Termes sensibles relus au rendu par le test de fumée : `measure` jusqu'à E9, puis `block`.
-  EVORA_TERMS_GATE: "measure"
+  # Termes sensibles (Lumetri, Lightroom, Acrobat, Premiere, Adobe, Cycore) : bloquants depuis E9
+  # (EVORA-KIN-08), dans les chaînes affichées après le catalogue de surcharge et au rendu.
+  EVORA_TERMS_GATE: "block"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
@@ -271,6 +272,9 @@ jobs:
 
       - name: Gate on the displayed catalogues (emoji and symbols, E10)
         run: python3 .github/evora/gates.py catalog --repo . --stacks "$EVORA_FONT_STACKS" --mode "$EVORA_EMOJI_GATE"
+
+      - name: Gate on sensitive terms after the display-name overrides (E9)
+        run: python3 .github/evora/gates.py terms --repo . --mode "$EVORA_TERMS_GATE"
 
       - name: Smoke test (headless Chrome, engine framed by another origin)
         env:

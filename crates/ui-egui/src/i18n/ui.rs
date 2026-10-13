@@ -136,9 +136,10 @@ pub(crate) fn catalog_characters(language: &str) -> Vec<char> {
     catalog(language).into_iter().flat_map(|c| c.values()).flat_map(|s| s.chars()).collect::<std::collections::BTreeSet<_>>().into_iter().collect()
 }
 
-/// Translate one interface string: the current language's row for `text`, or `text` itself.
+/// Translate one interface string: the current language's row for `text`, or `text` itself, then
+/// the display-name overrides (Evora E9, [`super::neutral`]).
 pub(crate) fn tr(text: &str) -> &str {
-    catalog(current()).and_then(|c| c.get(text)).copied().unwrap_or(text)
+    super::neutral::neutral_str(catalog(current()).and_then(|c| c.get(text)).copied().unwrap_or(text))
 }
 
 /// Translate an interface string that carries values: each `{}` takes the next argument. A missing

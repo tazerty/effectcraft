@@ -187,7 +187,8 @@ fn effect_row(
     // The row draws the effect's name in the interface language; the automation label keeps the
     // registry's English name, which is what scripts and the control channel address (#821).
     let shown = crate::i18n::effects::name(e.id, e.name);
-    highlighted(lp, pos2(r.min.x + 56.0 + indent, r.center().y), &shown, query, &t);
+    // Evora (E9): the effect's name as the interface shows it (display-name overrides).
+    highlighted(lp, pos2(r.min.x + 56.0 + indent, r.center().y), &crate::i18n::neutral(&shown), query, &t);
     if e.float {
         lp.text(pos2(r.max.x - 10.0, r.center().y), Align2::RIGHT_CENTER, "32", Tokens::ui(9.5), t.text_faint);
     }
@@ -463,7 +464,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }) && let Some(pos) = ctx.pointer_hover_pos()
     {
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dnd-fx")));
-        let g = painter.layout_no_wrap(name, Tokens::ui(12.0), t.text);
+        let g = painter.layout_no_wrap(crate::i18n::neutral_owned(name), Tokens::ui(12.0), t.text);
         let r = Rect::from_min_size(pos + vec2(12.0, 8.0), g.size() + vec2(16.0, 8.0));
         painter.rect_filled(r, 4.0, Color32::from_rgba_premultiplied(40, 40, 40, 230));
         painter.rect_stroke(r, 4.0, Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);

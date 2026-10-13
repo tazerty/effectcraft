@@ -7,8 +7,8 @@
 // loading notice gone, the parent unable to read the frame (cross-origin), and no page error (no
 // exception, no console error, no error log entry, no Content-Security-Policy issue) in the page,
 // the frame or the engine's workers. It also reads the menus the engine draws (`ui.menu.list` in
-// every catalog language) and the widgets on screen (`ui.elements`), and counts ArtCraft marks,
-// default-emoji characters and sensitive terms in them. Prints `SMOKE` lines, a JSON report and a
+// every catalog language) and the widgets on screen (`ui.elements`), and counts ArtCraft marks and
+// default-emoji characters in them, and sensitive terms in the menu labels as drawn. Prints `SMOKE` lines, a JSON report and a
 // screenshot; exits non-zero on failure.
 //
 //   node smoke.mjs --parent=http://127.0.0.1:8602/parent.html --engine=http://127.0.0.1:8601 \
@@ -265,15 +265,16 @@ try {
         for (const seg of it.path || []) texts.push(String(seg));
       }
       perLanguage[lang] = texts.length;
-      labels.push(...texts.map((t) => [lang, t]));
+      labels.push(...texts.map((t) => [lang, t, "menu"]));
     }
     await evalIn(ctx, `window.effectcraft.execute("prefs.set", { key: "general.language", value: "system" })`, true, 30000).catch(() => {});
     const elements = await evalIn(ctx, `window.effectcraft.request("ui.elements", {}).then((r) => JSON.parse(JSON.stringify(r)))`, true, 60000).catch((e) => {
       warnings.push(`ui.elements: ${e.message}`);
       return [];
     });
-    for (const el of elements || []) labels.push(["screen", String(el.label ?? "")]);
-    const hits = (re) => labels.filter(([, t]) => re.test(t));
+    // Widgets on screen: their automation labels (source strings), checked for marks and emoji.
+    for (const el of elements || []) labels.push(["screen", String(el.label ?? ""), "screen"]);
+    const hits = (re, only) => labels.filter(([, t, src]) => (!only || src === only) && re.test(t));
     report.render = {
       menuItemsPerLanguage: perLanguage,
       screenElements: (elements || []).length,
@@ -281,8 +282,9 @@ try {
       brand: hits(BRAND).slice(0, 20),
       emoji: hits(EMOJI).slice(0, 20),
       pictographs: hits(PICTO).slice(0, 20),
-      terms: hits(TERMS).slice(0, 40),
-      termsCount: hits(TERMS).length,
+      // Sensitive terms: in the menu labels as drawn (after translation and the E9 overrides).
+      terms: hits(TERMS, "menu").slice(0, 40),
+      termsCount: hits(TERMS, "menu").length,
     };
     check(labels.length > 0, "aucun libellé relu au rendu (ui.menu.list, ui.elements)");
     check(report.render.brand.length === 0, `marques ArtCraft au rendu : ${JSON.stringify(report.render.brand)}`);

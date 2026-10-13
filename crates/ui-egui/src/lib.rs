@@ -1752,7 +1752,8 @@ impl EffectcraftApp {
         };
         if let Some(m) = msg {
             let t = &self.tokens;
-            let galley = ui.painter().layout_no_wrap(m.clone(), Tokens::ui(12.0), t.text);
+            // Evora (E9): engine messages go through the display-name overrides.
+            let galley = ui.painter().layout_no_wrap(crate::i18n::neutral(&m).into_owned(), Tokens::ui(12.0), t.text);
             let r = egui::Rect::from_min_size(egui::pos2(full.min.x + 16.0, full.max.y - 44.0 - lift), galley.size() + egui::vec2(24.0, 14.0));
             ui.painter().rect_filled(r, 6.0, t.panel_bg);
             ui.painter().rect_stroke(r, 6.0, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
