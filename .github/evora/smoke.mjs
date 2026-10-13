@@ -35,6 +35,10 @@ const termsMode = opt.terms || "measure";
 const linksMode = opt.links || "off";
 // `--expect-lang=fr` (patch E3): the engine was framed with `?lang=fr`: its menus must start translated.
 const expectLang = opt["expect-lang"] || "";
+// `--storage-check=<ns>` (patch E5): the engine was framed with `?storageNs=<ns>` and browser
+// storage: its stores must carry the namespace, and stores of another namespace (or of none),
+// seeded here, must be gone once the engine starts again.
+const storageNs = opt["storage-check"] || "";
 const LANGUAGES = ["en", "ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
 const BRAND = /artcraft|discord\.gg|getartcraft/i;
 const EMOJI = /\p{Emoji_Presentation}|\u{FE0F}|\u{20E3}/u;
@@ -281,6 +285,48 @@ try {
       report.lang = { expected: expectLang, labels: (initialLabels || []).length, translatedAtStart: differ, sample: (initialLabels || []).slice(0, 8) };
       check(differ >= 20, `langue imposée « ${expectLang} » absente au démarrage (${differ} libellés traduits)`);
     }
+    if (storageNs) {
+      const list = `(async () => {
+        const out = { opfs: [], idb: [] };
+        try { const root = await navigator.storage.getDirectory(); for await (const [n, h] of root.entries()) if (h.kind === "directory") out.opfs.push(n); } catch (e) { out.opfsError = String(e); }
+        try { out.idb = (await indexedDB.databases()).map((d) => d.name); } catch (e) { out.idbError = String(e); }
+        return out; })()`;
+      const first = await evalIn(ctx, list, true);
+      const backend = report.info && report.info.storage ? report.info.storage.backend : null;
+      const own = `evns-${storageNs}--effectcraft`;
+      const seed = ["evns-other--effectcraft", "evns-other--effectcraft-cache", "effectcraft"];
+      await evalIn(ctx, `(async () => { const root = await navigator.storage.getDirectory();
+        for (const n of ${JSON.stringify(seed)}) { const d = await root.getDirectoryHandle(n, { create: true }); await d.getFileHandle("seed", { create: true }); }
+        await new Promise((res, rej) => { const r = indexedDB.open("evns-other--effectcraft", 1); r.onupgradeneeded = () => r.result.createObjectStore("entries"); r.onsuccess = () => { r.result.close(); res(); }; r.onerror = () => rej(r.error); });
+        return true; })()`, true);
+      const seeded = await evalIn(ctx, list, true);
+      await evalIn(ctx, "setTimeout(() => location.reload(), 50), true").catch(() => {});
+      await sleep(1000);
+      const t1 = Date.now();
+      let again = null;
+      while (Date.now() - t1 < timeoutMs) {
+        const c2 = defaultCtx(engineOrigin);
+        if (c2) {
+          try {
+            again = await evalIn(c2, "window.effectcraftLoad ? JSON.parse(JSON.stringify(window.effectcraftLoad)) : null");
+          } catch {
+            again = null;
+          }
+          if (again && (again.readyMs !== undefined || again.error)) break;
+        }
+        await sleep(250);
+      }
+      const after = defaultCtx(engineOrigin) ? await evalIn(defaultCtx(engineOrigin), list, true) : null;
+      report.storage = { ns: storageNs, backend, first, seeded, reloadReady: !!(again && again.readyMs !== undefined), after };
+      check(backend === "opfs" || backend === "indexeddb", `stockage navigateur non persistant (${backend}) : l'espace de noms ne peut pas être vérifié`);
+      const ownSeen = backend === "opfs" ? first.opfs.includes(own) : first.idb.includes(own);
+      check(ownSeen, `aucun magasin « ${own} » au démarrage : ${JSON.stringify(first)}`);
+      const bare = ["effectcraft", "effectcraft-cache", "effectcraft-handles"];
+      check(!bare.some((n) => first.opfs.includes(n) || first.idb.includes(n)), `un magasin sans espace de noms existe : ${JSON.stringify(first)}`);
+      check(seed.every((n) => seeded.opfs.includes(n)), `amorçage des magasins étrangers raté : ${JSON.stringify(seeded)}`);
+      check(report.storage.reloadReady, "le moteur n'a pas redémarré après rechargement");
+      check(after && seed.every((n) => !after.opfs.includes(n)) && !after.idb.includes("evns-other--effectcraft"), `magasins étrangers non purgés : ${JSON.stringify(after)}`);
+    }
     if (linksMode === "block") {
       const pages = async () => (await send("Target.getTargets")).targetInfos.filter((x) => x.type === "page").length;
       const before = await pages();
@@ -336,7 +382,7 @@ try {
   const l = report.load || {};
   const r = report.render || {};
   console.log(
-    `SMOKE label=${label} ok=${report.ok} lang=${report.lang ? `${report.lang.expected}:${report.lang.translatedAtStart}` : "-"} links=${report.links ? `${report.links.pagesBefore}->${report.links.pagesAfter}/${report.links.errorsDuring.length}` : "-"} chrome="${report.chrome}" wall_ready_ms=${report.wallReadyMs} wasm_ms=${l.wasmMs !== undefined ? Math.round(l.wasmMs) : "-"} ready_ms=${l.readyMs !== undefined ? Math.round(l.readyMs) : "-"} backend=${report.info ? JSON.stringify(report.info.backend ?? null) : "-"} webgpu=${report.info ? report.info.webgpu : "-"} errors=${errors.length} csp=${issues.length} texts=${r.texts ?? "-"} brand=${r.brand ? r.brand.length : "-"} emoji=${r.emoji ? r.emoji.length : "-"} terms=${r.termsCount ?? "-"}`,
+    `SMOKE label=${label} ok=${report.ok} storage=${report.storage ? `${report.storage.backend}:${JSON.stringify(report.storage.first.opfs)}->${JSON.stringify(report.storage.after && report.storage.after.opfs)}` : "-"} lang=${report.lang ? `${report.lang.expected}:${report.lang.translatedAtStart}` : "-"} links=${report.links ? `${report.links.pagesBefore}->${report.links.pagesAfter}/${report.links.errorsDuring.length}` : "-"} chrome="${report.chrome}" wall_ready_ms=${report.wallReadyMs} wasm_ms=${l.wasmMs !== undefined ? Math.round(l.wasmMs) : "-"} ready_ms=${l.readyMs !== undefined ? Math.round(l.readyMs) : "-"} backend=${report.info ? JSON.stringify(report.info.backend ?? null) : "-"} webgpu=${report.info ? report.info.webgpu : "-"} errors=${errors.length} csp=${issues.length} texts=${r.texts ?? "-"} brand=${r.brand ? r.brand.length : "-"} emoji=${r.emoji ? r.emoji.length : "-"} terms=${r.termsCount ?? "-"}`,
   );
   for (const e of errors.slice(0, 30)) console.log(`SMOKE_ERROR ${e}`);
   for (const i of issues.slice(0, 10)) console.log(`SMOKE_CSP ${i}`);
@@ -359,6 +405,7 @@ try {
       `| Libellés relus au rendu (menus × ${LANGUAGES.length} langues + écran) | ${r.texts ?? "-"} |`,
       `| Marques / émojis / termes sensibles au rendu | ${r.brand ? r.brand.length : "-"} / ${r.emoji ? r.emoji.length : "-"} / ${r.termsCount ?? "-"} (${termsMode === "block" ? "bloquant" : "mesure"}) |`,
       `| Langue imposée (E3) | ${report.lang ? `${report.lang.expected} : ${report.lang.translatedAtStart} libellés de menu traduits dès le démarrage sur ${report.lang.labels}` : "non vérifiée"} |`,
+      `| Espace de noms du stockage (E5) | ${report.storage ? `« ${report.storage.ns} », ${report.storage.backend} ; au démarrage OPFS ${JSON.stringify(report.storage.first.opfs)}, IndexedDB ${JSON.stringify(report.storage.first.idb)} ; après amorçage et rechargement OPFS ${JSON.stringify(report.storage.after && report.storage.after.opfs)}, IndexedDB ${JSON.stringify(report.storage.after && report.storage.after.idb)}` : "non vérifié"} |`,
       `| Liens externes (E7 : 4 commandes Help) | ${report.links ? `pages ${report.links.pagesBefore} -> ${report.links.pagesAfter}, erreurs ${report.links.errorsDuring.length}` : "non vérifié"} |`,
       "",
     ];
