@@ -189,6 +189,14 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+      # Empreinte seule, en artefact séparé : vérifiable sans télécharger l'archive.
+      - name: Upload checksums
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.meta.outputs.name }}-SHA256SUMS
+          path: ${{ steps.pkg.outputs.out }}/SHA256SUMS
+          if-no-files-found: error
+
       # Les mesures ne bloquent pas (première passe) ; seul un garde-fou cassé (témoin en échec,
       # erreur de script) rend le job rouge, pour qu'un contrôle muet ne passe jamais pour un vert.
       - name: Guards (measures, not blocking in this first pass)
@@ -294,4 +302,6 @@ jobs:
           [ "$brand_site" -eq 0 ] || echo "::warning::$brand_site occurrence(s) de « artcraft » dans le site (cible du patch E1)"
           echo "GUARDS wasm_raw=$raw wasm_gzip=$gz wasm_brotli=\"$br\" zip=$zipsize files=$nfiles hosting=\"$hosting_cell\" ArtCraft=$brand_cs artcraft_i=$brand_site discord=$discord getartcraft=$getac licenses_artcraft=$brand_lic"
           if [ -n "$brand_rows" ]; then printf 'GUARDS_BRAND\n%s' "$brand_rows"; fi
+          echo "GUARDS_FILES"
+          (cd "$DIR" && find . -type f -printf '%10s  %P\n' | LC_ALL=C sort -k2)
           exit 0
