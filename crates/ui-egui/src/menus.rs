@@ -1506,7 +1506,8 @@ pub(crate) fn entry_label(app: &EffectcraftApp, e: &MenuEntry) -> String {
         }
         _ => effectcraft_engine::menus::entry_label(&app.session, e),
     };
-    crate::i18n::entry(app, e, shown)
+    // Evora (E9): display-name overrides after translation.
+    crate::i18n::neutral_owned(crate::i18n::entry(app, e, shown))
 }
 
 /// The entry's shortcut in the active keyboard shortcut preset.

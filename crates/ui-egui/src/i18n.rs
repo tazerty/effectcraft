@@ -9,7 +9,10 @@ use crate::EffectcraftApp;
 pub(crate) mod effects;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
 mod ui;
+/// Evora (E9): display-name override catalogue, applied after translation in every language.
+mod neutral;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
+pub(crate) use neutral::{neutral, neutral_owned};
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.

@@ -10,6 +10,9 @@ non-zero when a blocking gate fails):
   ArtCraft marks (artcraft, discord.gg, getartcraft) absent from the site (LICENSES/ excepted);
   every precompressed .br/.gz file decompresses to its original; CSP hashes of the inline scripts
   written to DIR/csp-hashes.txt; sizes printed.
+- `terms --repo DIR --mode measure|block`: sensitive third-party terms (Lumetri, Lightroom, Acrobat,
+  Premiere, Adobe, Cycore) left in the displayed string literals once the display-name override
+  catalogue of patch E9 (crates/ui-egui/src/i18n/neutral.rs, read from its source) is applied.
 - `catalog --repo DIR --mode measure|block`: emoji and symbol audit of the displayed catalogues
   (string literals of crates/ui-egui/src and crates/engine/src, tests excluded), each character
   resolved through egui's font stack as installed by crates/ui-egui/src/theme.rs (the font that
@@ -571,6 +574,83 @@ def cmd_catalog(args):
     return 1 if FAILURES else 0
 
 
+SENSITIVE_TERMS = ("Lumetri", "Lightroom", "Acrobat", "Premiere", "Adobe", "Cycore", "Premiere Pro Compatible")
+NEUTRAL_RS = "crates/ui-egui/src/i18n/neutral.rs"
+TERM_ROOTS = ("crates/ui-egui/src", "crates/engine/src", "crates/effects/src", "crates/interchange/src")
+
+
+def read_rules(repo):
+    """The (term, neutral) pairs of the display-name override catalogue (patch E9), from its source."""
+    src = open(os.path.join(repo, NEUTRAL_RS), encoding="utf-8").read()
+    m = re.search(r"pub\(crate\) const RULES: &\[\(&str, &str\)\] = &\[(.*?)\n\];", src, re.S)
+    if not m:
+        raise RuntimeError(f"RULES introuvable dans {NEUTRAL_RS}")
+    lits = [v for _, v in rust_strings(m.group(1))]
+    if not lits or len(lits) % 2:
+        raise RuntimeError(f"RULES illisible dans {NEUTRAL_RS} ({len(lits)} littéraux)")
+    return list(zip(lits[0::2], lits[1::2]))
+
+
+def apply_rules(rules, text):
+    if not any(t in text for t in ("Adobe", "Premiere", "Lumetri")):
+        return text
+    for a, b in rules:
+        text = text.replace(a, b)
+    return text
+
+
+def cmd_terms(args):
+    repo = args.repo
+    rules = read_rules(repo)
+    rows = [f"### Termes sensibles des chaînes affichées, après le catalogue de surcharge E9 ({len(rules)} règles)", ""]
+    # Witnesses: a covered phrase is neutralised, an uncovered term is still seen.
+    w1 = apply_rules(rules, "Adobe Premiere Pro Project...")
+    w2 = apply_rules(rules, "Cycore Particle World")
+    w_ok = w1 == "FCP XML Project..." and "Cycore" in w2
+    rows.append(f"Témoins : règle appliquée « {w1} », terme non couvert vu « {w2} » : {'OK' if w_ok else 'ÉCHEC'}.")
+    if not w_ok:
+        fail("témoin des termes en échec")
+    before = {t: 0 for t in SENSITIVE_TERMS}
+    after = {t: 0 for t in SENSITIVE_TERMS}
+    left = []
+    nfiles = nstr = 0
+    for root in TERM_ROOTS:
+        for p in sorted(glob.glob(os.path.join(repo, root, "**", "*.rs"), recursive=True)):
+            rel = os.path.relpath(p, repo).replace(os.sep, "/")
+            base = os.path.basename(p)
+            if "/tests/" in rel or base.startswith("tests") or base == "tests.rs" or rel == NEUTRAL_RS:
+                continue
+            nfiles += 1
+            for line, text in rust_strings(open(p, encoding="utf-8").read()):
+                nstr += 1
+                shown = apply_rules(rules, text)
+                for t in SENSITIVE_TERMS:
+                    before[t] += text.count(t)
+                    n = shown.count(t)
+                    after[t] += n
+                    if n:
+                        left.append(f"{rel}:{line} « {shown[:90]} »")
+    rows.append(f"{nfiles} fichiers ({', '.join(TERM_ROOTS)}), {nstr} littéraux, casse respectée (les identifiants en minuscules ne sont pas affichés).")
+    rows.append("")
+    rows.append("| Terme | Avant E9 | Affiché après E9 | Verdict |")
+    rows.append("|---|---|---|---|")
+    for t in SENSITIVE_TERMS:
+        verdict = "SANS_OBJET (absent du dépôt)" if before[t] == 0 else ("OK" if after[t] == 0 else "**reste affiché**")
+        rows.append(f"| {t} | {before[t]} | {after[t]} | {verdict} |")
+        print(f"GATE terms {t.replace(' ', '_')} before={before[t]} after={after[t]}")
+    rows.append("")
+    for x in sorted(set(left))[:40]:
+        rows.append(f"- reste : {x}")
+    if left:
+        msg = f"{len(set(left))} chaîne(s) affichée(s) gardent un terme sensible après E9"
+        if args.mode == "block":
+            fail(msg)
+        else:
+            print(f"::warning::{msg}")
+    summary(rows)
+    return 1 if FAILURES else 0
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -581,8 +661,11 @@ def main():
     c.add_argument("--repo", default=".")
     c.add_argument("--mode", choices=("measure", "block"), default="block")
     c.add_argument("--stacks", choices=tuple(STACKS), required=True)
+    t = sub.add_parser("terms")
+    t.add_argument("--repo", default=".")
+    t.add_argument("--mode", choices=("measure", "block"), default="block")
     args = p.parse_args()
-    return {"witness": cmd_witness, "site": cmd_site, "catalog": cmd_catalog}[args.cmd](args)
+    return {"witness": cmd_witness, "site": cmd_site, "catalog": cmd_catalog, "terms": cmd_terms}[args.cmd](args)
 
 
 if __name__ == "__main__":

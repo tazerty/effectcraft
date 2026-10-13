@@ -1223,7 +1223,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 ctx.data_mut(|d| d.insert_temp(rename_id, value));
             }
         } else {
-            let name = bp.text(pos2(tw.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, &shown, Tokens::semibold(12.0), t.text);
+            let name = bp.text(pos2(tw.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, crate::i18n::neutral(&shown), Tokens::semibold(12.0), t.text);
             app.auto.add(&format!("effectControls.effect.{}.name", g.uid), name, &g.name);
         }
         let rresp = ui.interact(reset, egui::Id::new(("ec-reset", g.uid)), Sense::click());
