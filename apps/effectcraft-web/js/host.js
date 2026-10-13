@@ -9,9 +9,87 @@
 
 // ------------------------------------------------------------------ storage
 
-const DIR = "effectcraft";
-const DB = "effectcraft";
+// Evora (E5): `?storageNs=<id>`, an opaque id the Evora shell gives per account (1 to 64 of
+// [A-Za-z0-9_-]), prefixes every browser store of the engine: the OPFS folders (`effectcraft`,
+// `effectcraft-cache`), the IndexedDB databases (`effectcraft`, `effectcraft-handles`) and the
+// localStorage keys (the engine writes none today). Workers receive the same id in their script
+// URL. It is a namespace, not a partition: accounts are isolated by the engine's own origin (mode
+// B). When a namespaced engine starts, the page deletes the other namespaces' stores and the
+// un-namespaced ones (`storagePurge`).
+const NS_PARAM = "storageNs";
+const NS_PREFIX = "evns-";
+const NS_BASES = ["effectcraft", "effectcraft-cache", "effectcraft-handles"];
+const STORAGE_NS = (() => {
+  try {
+    const v = new URLSearchParams(self.location.search).get(NS_PARAM);
+    return v && /^[A-Za-z0-9_-]{1,64}$/.test(v) ? v : "";
+  } catch {
+    return "";
+  }
+})();
+const nsName = (base) => (STORAGE_NS ? `${NS_PREFIX}${STORAGE_NS}--${base}` : base);
+
+const DIR = nsName("effectcraft");
+const DB = nsName("effectcraft");
 const STORE = "entries";
+
+// A store name that belongs to another namespace, or to none (the engine before a namespace).
+function foreignStore(name) {
+  if (NS_BASES.includes(name)) return true;
+  const m = /^evns-([A-Za-z0-9_-]{1,64})--(.+)$/.exec(name);
+  return !!m && m[1] !== STORAGE_NS && NS_BASES.includes(m[2]);
+}
+
+/// Evora (E5): delete the stores of the other namespaces (and the un-namespaced ones); with
+/// `all`, this namespace's too (logout, account switch). Best effort: a store another tab holds
+/// open stays. Resolves with what was deleted (`opfs:<name>`, `idb:<name>`, `ls:<key>`).
+export async function storagePurge(all) {
+  const doomed = (name) => foreignStore(name) || (!!all && STORAGE_NS !== "" && name.startsWith(`${NS_PREFIX}${STORAGE_NS}--`));
+  const purged = [];
+  try {
+    if (navigator.storage && navigator.storage.getDirectory) {
+      const root = await navigator.storage.getDirectory();
+      const names = [];
+      for await (const [name, h] of root.entries()) if (h.kind === "directory" && doomed(name)) names.push(name);
+      for (const name of names) {
+        try {
+          await root.removeEntry(name, { recursive: true });
+          purged.push(`opfs:${name}`);
+        } catch (e) { console.info(`storage purge: ${name}: ${e.message ?? e}`); }
+      }
+    }
+  } catch (e) { console.info(`storage purge (OPFS): ${e.message ?? e}`); }
+  try {
+    if (self.indexedDB && indexedDB.databases) {
+      for (const { name } of await indexedDB.databases()) {
+        if (!name || !doomed(name)) continue;
+        await new Promise((res) => {
+          const r = indexedDB.deleteDatabase(name);
+          r.onsuccess = r.onerror = r.onblocked = () => res();
+        });
+        purged.push(`idb:${name}`);
+      }
+    }
+  } catch (e) { console.info(`storage purge (IndexedDB): ${e.message ?? e}`); }
+  try {
+    if (self.localStorage) {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && /^evns-/.test(k) && doomed(k.split("/")[0])) {
+          localStorage.removeItem(k);
+          purged.push(`ls:${k}`);
+        }
+      }
+    }
+  } catch (e) { console.info(`storage purge (localStorage): ${e.message ?? e}`); }
+  if (purged.length) console.info(`storage purge: ${purged.join(", ")}`);
+  return purged;
+}
+
+/// Evora (E5): the namespace in force and the store names it gives (for the host and the tests).
+export function storageNamespace() {
+  return { ns: STORAGE_NS, opfs: DIR, indexeddb: DB, cache: CACHE_ROOT, handles: HANDLES_DB };
+}
 let backend = null;
 
 // OPFS file names can't hold "/": keys are percent-encoded.
@@ -91,6 +169,8 @@ function memory() {
 /// Open the store: OPFS, else IndexedDB, else memory (nothing persists). Resolves with the
 /// backend's name. `prefer` ("opfs" | "indexeddb" | "memory") forces one (tests).
 export async function storeOpen(prefer) {
+  // Evora (E5): a namespaced engine starts by deleting the other namespaces' stores.
+  if (STORAGE_NS) await storagePurge(false);
   const order = { opfs: [opfs, idb, memory], indexeddb: [idb, memory], memory: [memory] }[prefer] ?? [opfs, idb, memory];
   for (const make of order) {
     try { backend = await make(); break; } catch (e) { console.info(`storage: ${make.name}: ${e.message ?? e}`); }
@@ -293,8 +373,15 @@ export function setJobWorkerGpu(on) {
   jobWorkerGpu = !!on;
 }
 
+// Evora (E5): a worker sees the page's storage namespace through its own script URL.
+function workerUrl(base) {
+  const url = new URL("worker.js", base);
+  if (STORAGE_NS) url.searchParams.set(NS_PARAM, STORAGE_NS);
+  return url;
+}
+
 function spawn(base) {
-  const worker = new Worker(new URL("worker.js", base), { type: "module", name: "effectcraft-worker" });
+  const worker = new Worker(workerUrl(base), { type: "module", name: "effectcraft-worker" });
   const w = { worker, files: new Map(), ready: null, gpu: null };
   w.ready = new Promise((res, rej) => {
     worker.onmessage = (e) => {
@@ -380,7 +467,7 @@ const frameWorkers = [];
 /// GPU effects on it.
 export function frameWorkerStart(base, onMessage, gpu) {
   const index = frameWorkers.length;
-  const worker = new Worker(new URL("worker.js", base), { type: "module", name: `effectcraft-frames-${index}` });
+  const worker = new Worker(workerUrl(base), { type: "module", name: `effectcraft-frames-${index}` });
   worker.onmessage = (e) => {
     const m = e.data;
     if (m && m.type === "frameReply") onMessage(index, m.json, m.bytes ? new Uint8Array(m.bytes) : null, undefined);
@@ -403,7 +490,7 @@ export function frameWorkerStart(base, onMessage, gpu) {
 // (a temporary file moved into place, so a reader never sees a partial entry; every entry also
 // ends in a checksum) and read the layer buffers they prefetch; the page lists, reads and
 // deletes.
-const CACHE_ROOT = "effectcraft-cache";
+const CACHE_ROOT = nsName("effectcraft-cache");
 const CACHE_KINDS = ["frames", "layers", "mattes"];
 const cacheDirHandles = {};
 
@@ -517,7 +604,7 @@ export function frameWorkerPost(index, msg, transfer) {
 // "name/sub/file" → FileSystemFileHandle}. Their handles are remembered in IndexedDB so the
 // folders come back on the next visit (once the browser grants access again).
 const folders = new Map();
-const HANDLES_DB = "effectcraft-handles";
+const HANDLES_DB = nsName("effectcraft-handles");
 const MAX_ENTRIES = 20000;
 
 async function handlesDb() {
