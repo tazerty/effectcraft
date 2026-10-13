@@ -1,4 +1,5 @@
-// EffectCraft service worker: the app works offline once loaded, and installs as an app.
+// Service worker of the Evora build (E1: cache names carry no upstream brand): the app works
+// offline once loaded, and installs as an app. The Evora shell starts it with `?nosw`.
 //
 // `cargo xtask web` fills in the build's file list and version. Every file is precached into a
 // cache named after the version, served cache-first (responses keep the server's headers, so
@@ -6,7 +7,7 @@
 // one activates. Anything else same-origin is fetched from the network and cached for next time.
 const VERSION = "__EC_VERSION__";
 const FILES = __EC_FILES__;
-const CACHE = `effectcraft-${VERSION}`;
+const CACHE = `kinetika-${VERSION}`;
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -21,7 +22,7 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k.startsWith("effectcraft-") && k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => (k.startsWith("kinetika-") || k.startsWith("effectcraft-")) && k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });

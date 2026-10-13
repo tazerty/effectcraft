@@ -1,8 +1,8 @@
 asset:        favicon.svg
-title:        EffectCraft web app icon (favicon)
-author:       EffectCraft contributors (drawing by the project owner in ArtCraft)
-source:       original work
+title:        Evora build web app icon (three stacked layers on an indigo tile)
+author:       Evora (tazerty/effectcraft fork), patch E1
+source:       original work, drawn for the Evora fork (no ArtCraft mark, no upstream artwork)
 license:      MIT OR Apache-2.0
-license-file: assets/app-icon/LICENSE.txt
-added:        2026-10-02 by EffectCraft contributors (Claude agent, app icon)
-notes:        Copy of assets/app-icon/effectcraft-small.svg (the lighter vector trace of the app icon). Replaces the earlier code-drawn split-square mark.
+license-file: LICENSE-MIT
+added:        2026-10-12 by the Evora fork (patch E1: removal of the ArtCraft marks)
+notes:        Replaces the upstream app icon in the web build (docs/brand/LICENSE-brand.txt asks a modified build to drop the ArtCraft marks). Same drawing as the Tools bar mark painted by crates/ui-egui/src/header.rs (paint_logo).
