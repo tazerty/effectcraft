@@ -5,10 +5,8 @@
 accepted = [
     "MIT",
     "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "ISC",
     "Zlib",
     "MPL-2.0",
     "Unicode-3.0",
@@ -16,3 +14,7 @@ accepted = [
 targets = ["wasm32-unknown-unknown"]
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
+
+# egui's default fonts compiled into the binary (same exception as deny.toml).
+[epaint_default_fonts]
+accepted = ["OFL-1.1", "Ubuntu-font-1.0"]

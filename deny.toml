@@ -18,24 +18,33 @@ exclude-dev = true
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+    # paste 1.0.15 (archived by its author, "no safe upgrade"): a procedural macro, run at build
+    # time only, so none of its code is in the wasm; reached through exr <- pulp (image, engine,
+    # media). Reviewed 2026-10-13 (EVORA-KIN-05); to re-examine at every upstream version bump.
+    { id = "RUSTSEC-2024-0436", reason = "paste: build-time proc-macro, unmaintained, no safe upgrade, not shipped in the wasm (via exr <- pulp)" },
+]
 
 [licenses]
 # Permissive licences only, as the upstream AGENTS.md requires (MIT, Apache, BSD, ISC, Zlib,
 # unmodified MPL-2.0), plus the Unicode data licence of the Unicode tables crates.
+# (Only licences met in the graph are listed: an unused allowance is a cargo-deny warning.)
 allow = [
     "MIT",
     "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "ISC",
     "Zlib",
     "MPL-2.0",
     "Unicode-3.0",
 ]
 confidence-threshold = 0.9
-exceptions = []
+exceptions = [
+    # egui's default fonts, compiled into the binary (Ubuntu Light, Hack, Noto Emoji, the emoji
+    # icon font): font licences that allow embedding and redistribution with their text, which
+    # cargo-about copies into LICENSES/THIRD-PARTY-LICENSES.txt. Reviewed 2026-10-13 (EVORA-KIN-05).
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+]
 
 [licenses.private]
 # The workspace crates are `MIT OR Apache-2.0` (Cargo.toml) and are checked like the others.
