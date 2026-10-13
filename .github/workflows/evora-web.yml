@@ -18,7 +18,9 @@
 #   origine, puis sous la CSP prévue, plus un témoin saboté qui doit échouer). L'audit des émojis
 #   des catalogues (E10) et les termes sensibles relus au rendu (E9) sont mesurés jusqu'à leur
 #   patch, qui les rend bloquants (variables EVORA_* ci-dessous).
-# - L'artefact n'est envoyé qu'après toutes les portes : un artefact publié a passé les portes.
+# - L'artefact n'est envoyé qu'après toutes les portes : un artefact publié a passé les portes. Il
+#   porte le nom Evora (evora-kinetika-web-<tag>) depuis EVORA-KIN-07, une fois E1 posé et les
+#   portes vertes, jamais avant.
 name: Evora web
 
 on:
@@ -95,7 +97,8 @@ jobs:
           {
             echo "tag=$tag"
             echo "version=$version"
-            echo "name=evora-effectcraft-web-$tag"
+            # Nom Evora depuis EVORA-KIN-07 : E1 posé et portes vertes (runs 38365896075 et 38369996105).
+            echo "name=evora-kinetika-web-$tag"
           } >> "$GITHUB_OUTPUT"
           echo "Tag amont $tag, version $version, commit $(git rev-parse HEAD)"
 
