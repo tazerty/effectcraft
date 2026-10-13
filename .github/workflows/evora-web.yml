@@ -12,7 +12,8 @@
 # - wasm-bindgen-cli à la version exacte de la crate wasm-bindgen (xtask/src/main.rs, Cargo.lock).
 # - L'archive garde le nom amont (evora-effectcraft-web-<tag>.zip) tant que le patch E1 (retrait
 #   des marques ArtCraft) n'est pas posé ; les garde-fous de fin de job mesurent cette cible
-#   sans bloquer (première passe).
+#   sans bloquer (première passe), après l'envoi de l'artefact. Leurs témoins, eux, bloquent :
+#   un détecteur qui ne voit plus ce qu'on lui montre rend le job rouge (EVORA-KIN-01).
 name: Evora web
 
 on:
@@ -178,82 +179,6 @@ jobs:
             echo "out=$out"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Guards (report only in this first pass)
-        continue-on-error: true
-        env:
-          DIR: ${{ steps.pkg.outputs.dir }}
-          OUT: ${{ steps.pkg.outputs.out }}
-          NAME: ${{ steps.meta.outputs.name }}
-          TAG: ${{ steps.meta.outputs.tag }}
-        run: |
-          set -uo pipefail
-          count() { grep -a -o -- "$1" "$2" 2>/dev/null | wc -l; }
-          counti() { grep -a -o -i -- "$1" "$2" 2>/dev/null | wc -l; }
-          wasm="$DIR/effectcraft_web_bg.wasm"
-          raw=$(stat -c %s "$wasm")
-          gz=$(gzip -9 -c "$wasm" | wc -c)
-          if command -v brotli >/dev/null; then br=$(brotli -c -q 11 "$wasm" | wc -c); else br="non mesuré (brotli absent)"; fi
-          zipsize=$(stat -c %s "$OUT/$NAME.zip")
-          hosting=$(cd "$DIR" && find . \( -name '_headers' -o -name '.htaccess' -o -name '*.conf' \) -print | sort)
-          site_files=$(cd "$DIR" && find . -type f -not -path './LICENSES/*' | LC_ALL=C sort)
-          brand_site=0
-          brand_rows=""
-          for f in $site_files; do
-            n=$(count 'ArtCraft' "$DIR/$f"); ni=$(counti 'artcraft' "$DIR/$f")
-            d=$(count 'discord.gg' "$DIR/$f"); g=$(counti 'getartcraft' "$DIR/$f")
-            brand_site=$((brand_site + ni))
-            if [ "$ni" -gt 0 ] || [ "$d" -gt 0 ] || [ "$g" -gt 0 ]; then
-              brand_rows="$brand_rows| \`${f#./}\` | $n | $ni | $d | $g |"$'\n'
-            fi
-          done
-          brand_lic=0
-          for f in "$DIR"/LICENSES/*; do brand_lic=$((brand_lic + $(counti 'artcraft' "$f"))); done
-          {
-            echo "## Evora effectcraft web $TAG"
-            echo
-            echo "| Élément | Valeur |"
-            echo "|---|---|"
-            echo "| Branche | \`$GITHUB_REF_NAME\` |"
-            echo "| Commit | \`$(git rev-parse HEAD)\` |"
-            echo "| rustc | \`$(rustc --version)\` |"
-            echo "| wasm-bindgen | \`$(wasm-bindgen --version)\` |"
-            echo "| wasm-opt | $(command -v wasm-opt >/dev/null && wasm-opt --version || echo 'absent (non appliqué)') |"
-            echo "| Archive | \`$NAME.zip\`, $zipsize octets |"
-            echo "| SHA-256 | \`$(cut -d' ' -f1 "$OUT/SHA256SUMS")\` |"
-            echo
-            echo "### Garde-fous (non bloquants pour cette première passe)"
-            echo
-            echo "| Garde-fou | Mesure | Cible |"
-            echo "|---|---|---|"
-            if [ -z "$hosting" ]; then
-              echo "| Fichiers d'hébergement (\`_headers\`, \`.htaccess\`, \`*.conf\`) | aucun | aucun |"
-            else
-              echo "| Fichiers d'hébergement (\`_headers\`, \`.htaccess\`, \`*.conf\`) | $(echo "$hosting" | tr '\n' ' ') | aucun |"
-            fi
-            echo "| Taille de \`effectcraft_web_bg.wasm\` brute | $raw octets | ligne de base |"
-            echo "| Taille gzip -9 | $gz octets | ligne de base |"
-            echo "| Taille brotli -q 11 | $br | ligne de base |"
-            echo "| Occurrences « artcraft » (casse ignorée) dans le site | $brand_site | 0 après E1 |"
-            echo "| Occurrences « artcraft » dans \`LICENSES/\` (mentions conservées) | $brand_lic | conservées |"
-            echo
-            if [ -n "$brand_rows" ]; then
-              echo "#### Marques par fichier du site (mesure de la cible E1)"
-              echo
-              echo "| Fichier | ArtCraft | artcraft (casse ignorée) | discord.gg | getartcraft |"
-              echo "|---|---|---|---|---|"
-              printf '%s' "$brand_rows"
-              echo
-            fi
-            echo "#### Contenu du site"
-            echo
-            echo '```'
-            (cd "$DIR" && find . -type f -printf '%10s  %P\n' | LC_ALL=C sort -k2)
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          [ -z "$hosting" ] || echo "::warning::fichiers d'hébergement dans l'archive : $hosting"
-          [ "$brand_site" -eq 0 ] || echo "::warning::$brand_site occurrence(s) de la marque ArtCraft dans le site (cible du patch E1)"
-          echo "wasm $raw octets brut, $gz gzip ; marques site $brand_site ; licences $brand_lic"
-
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -263,3 +188,110 @@ jobs:
             ${{ steps.pkg.outputs.out }}/SHA256SUMS
           if-no-files-found: error
           compression-level: 0
+
+      # Les mesures ne bloquent pas (première passe) ; seul un garde-fou cassé (témoin en échec,
+      # erreur de script) rend le job rouge, pour qu'un contrôle muet ne passe jamais pour un vert.
+      - name: Guards (measures, not blocking in this first pass)
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+          OUT: ${{ steps.pkg.outputs.out }}
+          NAME: ${{ steps.meta.outputs.name }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -uo pipefail
+          set +e
+          # grep rend 1 quand il ne trouve rien : les compteurs l'absorbent explicitement.
+          count()  { { grep -a -o -- "$1" "$2" 2>/dev/null || true; } | wc -l; }
+          counti() { { grep -a -o -i -- "$1" "$2" 2>/dev/null || true; } | wc -l; }
+          hosting_in() { (cd "$1" && find . \( -name '_headers' -o -name '.htaccess' -o -name '*.conf' \) -print | LC_ALL=C sort); }
+
+          # Témoins : chaque détecteur doit voir ce qu'on lui montre, sinon il est cassé.
+          fx="$RUNNER_TEMP/evora-guard-fixture"
+          mkdir -p "$fx/sub"
+          : > "$fx/_headers"; : > "$fx/sub/.htaccess"; : > "$fx/sub/site.conf"
+          printf 'xxArtCraftyy artcraft discord.gg/abc getartcraft.com' > "$fx/brand.bin"
+          w_host=$(hosting_in "$fx" | wc -l)
+          w_b=$(count 'ArtCraft' "$fx/brand.bin"); w_bi=$(counti 'artcraft' "$fx/brand.bin")
+          w_d=$(count 'discord.gg' "$fx/brand.bin"); w_g=$(counti 'getartcraft' "$fx/brand.bin")
+          if [ "$w_host" -ne 3 ] || [ "$w_b" -ne 1 ] || [ "$w_bi" -ne 3 ] || [ "$w_d" -ne 1 ] || [ "$w_g" -ne 1 ]; then
+            echo "::error::témoins en échec : hébergement $w_host/3, ArtCraft $w_b/1, artcraft $w_bi/3, discord.gg $w_d/1, getartcraft $w_g/1"
+            exit 1
+          fi
+          echo "Témoins OK : hébergement 3/3, ArtCraft 1/1, artcraft 3/3, discord.gg 1/1, getartcraft 1/1"
+
+          wasm="$DIR/effectcraft_web_bg.wasm"
+          [ -f "$wasm" ] || { echo "::error::$wasm manquant"; exit 1; }
+          raw=$(stat -c %s "$wasm")
+          gz=$(gzip -9 -c "$wasm" | wc -c)
+          if command -v brotli >/dev/null; then
+            br="$(brotli -c -q 11 "$wasm" | wc -c) octets"
+          else
+            br="non mesuré (brotli absent du runner)"
+          fi
+          zipsize=$(stat -c %s "$OUT/$NAME.zip")
+          hosting=$(hosting_in "$DIR")
+          site_files=$(cd "$DIR" && find . -type f -not -path './LICENSES/*' | LC_ALL=C sort)
+          nfiles=$(echo "$site_files" | wc -l)
+          brand_site=0; brand_cs=0; discord=0; getac=0; brand_rows=""
+          for f in $site_files; do
+            n=$(count 'ArtCraft' "$DIR/$f"); ni=$(counti 'artcraft' "$DIR/$f")
+            d=$(count 'discord.gg' "$DIR/$f"); g=$(counti 'getartcraft' "$DIR/$f")
+            brand_cs=$((brand_cs + n)); brand_site=$((brand_site + ni)); discord=$((discord + d)); getac=$((getac + g))
+            if [ "$ni" -gt 0 ] || [ "$d" -gt 0 ] || [ "$g" -gt 0 ]; then
+              brand_rows="$brand_rows| \`${f#./}\` | $n | $ni | $d | $g |"$'\n'
+            fi
+          done
+          brand_lic=0
+          for f in "$DIR"/LICENSES/*; do brand_lic=$((brand_lic + $(counti 'artcraft' "$f"))); done
+          if [ -z "$hosting" ]; then hosting_cell="aucun"; else hosting_cell="$(echo "$hosting" | tr '\n' ' ')"; fi
+          wasm_opt="$(command -v wasm-opt >/dev/null && wasm-opt --version || echo 'absent (non appliqué)')"
+
+          {
+            echo "## Evora effectcraft web $TAG"
+            echo
+            echo "| Élément | Valeur |"
+            echo "|---|---|"
+            echo "| Branche | \`$GITHUB_REF_NAME\` |"
+            echo "| Commit | \`$(git rev-parse HEAD)\` |"
+            echo "| rustc | \`$(rustc --version)\` |"
+            echo "| wasm-bindgen | \`$(wasm-bindgen --version)\` |"
+            echo "| wasm-opt | $wasm_opt |"
+            echo "| Archive | \`$NAME.zip\`, $zipsize octets, $nfiles fichiers de site |"
+            echo "| SHA-256 | \`$(cut -d' ' -f1 "$OUT/SHA256SUMS")\` |"
+            echo
+            echo "### Garde-fous (mesures non bloquantes pour cette première passe)"
+            echo
+            echo "Témoins : hébergement 3/3, ArtCraft 1/1, artcraft 3/3, discord.gg 1/1, getartcraft 1/1."
+            echo
+            echo "| Garde-fou | Mesure | Cible |"
+            echo "|---|---|---|"
+            echo "| Fichiers d'hébergement (\`_headers\`, \`.htaccess\`, \`*.conf\`) | $hosting_cell | aucun |"
+            echo "| \`effectcraft_web_bg.wasm\` brut | $raw octets | ligne de base |"
+            echo "| \`effectcraft_web_bg.wasm\` gzip -9 | $gz octets | ligne de base |"
+            echo "| \`effectcraft_web_bg.wasm\` brotli -q 11 | $br | ligne de base |"
+            echo "| « ArtCraft » (casse exacte) dans le site | $brand_cs | 0 après E1 |"
+            echo "| « artcraft » (casse ignorée) dans le site | $brand_site | 0 après E1 |"
+            echo "| « discord.gg » dans le site | $discord | 0 après E1/E7 |"
+            echo "| « getartcraft » (casse ignorée) dans le site | $getac | 0 après E1 |"
+            echo "| « artcraft » dans \`LICENSES/\` (mentions de copyright) | $brand_lic | conservées |"
+            echo
+            if [ -n "$brand_rows" ]; then
+              echo "#### Marques par fichier du site (mesure de la cible E1)"
+              echo
+              echo "| Fichier | ArtCraft | artcraft (casse ignorée) | discord.gg | getartcraft |"
+              echo "|---|---|---|---|---|"
+              printf '%s' "$brand_rows"
+              echo
+            fi
+            echo "#### Contenu de l'archive"
+            echo
+            echo '```'
+            (cd "$DIR" && find . -type f -printf '%10s  %P\n' | LC_ALL=C sort -k2)
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ -z "$hosting" ] || echo "::warning::fichiers d'hébergement dans l'archive : $hosting_cell"
+          [ "$brand_site" -eq 0 ] || echo "::warning::$brand_site occurrence(s) de « artcraft » dans le site (cible du patch E1)"
+          echo "GUARDS wasm_raw=$raw wasm_gzip=$gz wasm_brotli=\"$br\" zip=$zipsize files=$nfiles hosting=\"$hosting_cell\" ArtCraft=$brand_cs artcraft_i=$brand_site discord=$discord getartcraft=$getac licenses_artcraft=$brand_lic"
+          if [ -n "$brand_rows" ]; then printf 'GUARDS_BRAND\n%s' "$brand_rows"; fi
+          exit 0
