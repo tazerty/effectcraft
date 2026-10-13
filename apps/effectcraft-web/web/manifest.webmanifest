@@ -1,7 +1,7 @@
 {
-  "name": "EffectCraft",
-  "short_name": "EffectCraft",
-  "description": "Motion graphics and visual effects compositor, in the browser",
+  "name": "Kinetika",
+  "short_name": "Kinetika",
+  "description": "Motion design and visual effects (Evora build based on EffectCraft)",
   "id": "./",
   "start_url": "./",
   "scope": "./",

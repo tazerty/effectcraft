@@ -297,8 +297,12 @@ fn web(args: &[String]) -> Result<(), String> {
             std::fs::copy(e.path(), dist.join(&name)).map_err(|e| format!("{name}: {e}"))?;
         }
     }
-    // PWA icons: the app icon (assets/app-icon, attributed there).
+    // PWA icons: the app icon (assets/app-icon, attributed there), unless the web folder brings
+    // its own (Evora E1: the fork's icons replace the upstream app icon in the web build).
     for n in [256, 512] {
+        if web.join(format!("icon-{n}.png")).exists() {
+            continue;
+        }
         let src = format!("assets/app-icon/hicolor/{n}x{n}/apps/ai.storyteller.effectcraft.png");
         std::fs::copy(&src, dist.join(format!("icon-{n}.png"))).map_err(|e| format!("{src}: {e}"))?;
     }
