@@ -1,19 +1,24 @@
 # Evora : build web (WASM) du fork tazerty/effectcraft, futur moteur d'Evora Kinetika.
 #
-# Écrit par Evora (patch EVORA-KIN-00) à partir de packaging/web/package.sh et de docs/web.md
-# de ce dépôt (MIT OR Apache-2.0). Rien n'est repris de storytold/craft-common-actions.
-# Accord de Gabriel du 2026-10-12 (D-2) : poussée de la branche evora/<tag> et activation
-# d'Actions sur ce fork.
+# Écrit par Evora (patchs EVORA-KIN-00 à 02, puis EVORA-KIN-04 « CI : portes bloquantes ») à
+# partir de packaging/web/package.sh et de docs/web.md de ce dépôt (MIT OR Apache-2.0). Rien n'est
+# repris de storytold/craft-common-actions. Accord de Gabriel du 2026-10-12 (D-2) : poussée de la
+# branche evora/<tag>, activation d'Actions sur ce fork, code d'application sur la branche.
 #
 # - Aucune action tierce : seulement actions/checkout, actions/cache et actions/upload-artifact,
-#   épinglées par SHA complet.
-# - Toolchain Rust installée par rustup à une version exacte (le dépôt n'a pas de rust-toolchain ;
-#   Cargo.toml exige rust-version 1.95 ; 1.99.0 est la version du build de release amont v0.9.2).
-# - wasm-bindgen-cli à la version exacte de la crate wasm-bindgen (xtask/src/main.rs, Cargo.lock).
-# - L'archive garde le nom amont (evora-effectcraft-web-<tag>.zip) tant que le patch E1 (retrait
-#   des marques ArtCraft) n'est pas posé ; les garde-fous de fin de job mesurent cette cible
-#   sans bloquer (première passe), après l'envoi de l'artefact. Leurs témoins, eux, bloquent :
-#   un détecteur qui ne voit plus ce qu'on lui montre rend le job rouge (EVORA-KIN-01).
+#   épinglées par SHA complet. Les scripts des portes sont écrits par Evora (.github/evora/).
+# - Outils à version exacte, vérifiés : Rust (rustup), wasm-bindgen-cli (version de Cargo.lock et
+#   de xtask), cargo-deny et cargo-about (binaires de leur release, SHA-256 épinglé ci-dessous).
+#   Chrome, Node, Python, Perl, gzip et brotli sont ceux de l'image ubuntu-latest : leurs versions
+#   sont imprimées au journal.
+# - Portes BLOQUANTES depuis E1 (EVORA-KIN-03) : témoins des détecteurs ; cargo-deny (licences et
+#   avis de sécurité, deny.toml) ; cargo-about (LICENSES/THIRD-PARTY-LICENSES.txt, --fail) ;
+#   fichiers d'hébergement absents ; marques ArtCraft absentes du site ; .br/.gz vérifiés ;
+#   empreintes CSP des scripts inline (csp-hashes.txt) ; test de fumée Chrome (iframe d'une autre
+#   origine, puis sous la CSP prévue, plus un témoin saboté qui doit échouer). L'audit des émojis
+#   des catalogues (E10) et les termes sensibles relus au rendu (E9) sont mesurés jusqu'à leur
+#   patch, qui les rend bloquants (variables EVORA_* ci-dessous).
+# - L'artefact n'est envoyé qu'après toutes les portes : un artefact publié a passé les portes.
 name: Evora web
 
 on:
@@ -31,6 +36,16 @@ concurrency:
 env:
   RUST_TOOLCHAIN: "1.99.0"
   WASM_BINDGEN_CLI: "0.2.129"
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+  CARGO_ABOUT_VERSION: "0.9.2"
+  CARGO_ABOUT_SHA256: "9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af"
+  # Piles de polices de l'audit des catalogues : `upstream` jusqu'à E10, puis `evora`.
+  EVORA_FONT_STACKS: "upstream"
+  # Audit des émojis des catalogues : `measure` jusqu'à E10, puis `block`.
+  EVORA_EMOJI_GATE: "measure"
+  # Termes sensibles relus au rendu par le test de fumée : `measure` jusqu'à E9, puis `block`.
+  EVORA_TERMS_GATE: "measure"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
@@ -134,8 +149,57 @@ jobs:
             echo "wasm-opt absent : xtask saute l'optimisation binaryen (comme la release amont)"
           fi
 
+      - name: Install audit tools (cargo-deny ${{ env.CARGO_DENY_VERSION }}, cargo-about ${{ env.CARGO_ABOUT_VERSION }}, SHA-256 pinned)
+        run: |
+          set -euo pipefail
+          bin="$HOME/.evora-tools/audit/bin"
+          mkdir -p "$bin"
+          fetch() {
+            local name="$1" ver="$2" sum="$3"
+            local tgz="$name-$ver-x86_64-unknown-linux-musl.tar.gz"
+            local dl="$RUNNER_TEMP/evora-dl/$name"
+            mkdir -p "$dl"
+            curl -fsSL --retry 3 -o "$dl/$tgz" "https://github.com/EmbarkStudios/$name/releases/download/$ver/$tgz"
+            echo "$sum  $dl/$tgz" | sha256sum -c -
+            tar -xzf "$dl/$tgz" -C "$dl"
+            local exe
+            exe="$(find "$dl" -type f -name "$name" | head -n 1)"
+            [ -n "$exe" ] || { echo "::error::$name introuvable dans $tgz"; exit 1; }
+            install -m 0755 "$exe" "$bin/$name"
+          }
+          fetch cargo-deny "$CARGO_DENY_VERSION" "$CARGO_DENY_SHA256"
+          fetch cargo-about "$CARGO_ABOUT_VERSION" "$CARGO_ABOUT_SHA256"
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/cargo-deny" --version | tee /dev/stderr | grep -qF "$CARGO_DENY_VERSION" || { echo "::error::cargo-deny n'est pas $CARGO_DENY_VERSION"; exit 1; }
+          "$bin/cargo-about" --version | tee /dev/stderr | grep -qF "$CARGO_ABOUT_VERSION" || { echo "::error::cargo-about n'est pas $CARGO_ABOUT_VERSION"; exit 1; }
+
+      - name: Runner tools of the gates (versions)
+        run: |
+          set -euo pipefail
+          google-chrome --version
+          node --version
+          python3 --version
+          perl -MUnicode::UCD -e 'printf "perl %vd, Unicode %s\n", $^V, Unicode::UCD::UnicodeVersion()'
+          brotli --version
+          gzip --version | head -n 1
+          zip -v | sed -n 2p
+          if node -e 'process.exit(typeof WebSocket === "function" ? 0 : 1)'; then
+            echo "NODE_WS=" >> "$GITHUB_ENV"
+          else
+            echo "NODE_WS=--experimental-websocket" >> "$GITHUB_ENV"
+            echo "Node sans WebSocket global : --experimental-websocket"
+          fi
+
+      - name: Gate witnesses (every detector must see what it is shown)
+        run: python3 .github/evora/gates.py witness
+
       - name: Fetch dependencies (locked)
         run: cargo fetch --locked
+
+      - name: Licences and advisories (cargo-deny, web crate graph, wasm32)
+        run: |
+          set -euo pipefail
+          cargo deny --manifest-path apps/effectcraft-web/Cargo.toml --locked check --show-stats advisories licenses
 
       - name: Build the web app (cargo xtask web, release)
         run: |
@@ -143,10 +207,23 @@ jobs:
           cargo xtask web
           git diff --exit-code -- Cargo.lock || { echo "::error::le build a modifié Cargo.lock"; exit 1; }
 
+      - name: Third-party licences (cargo-about)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evora-about"
+          cargo about generate --manifest-path apps/effectcraft-web/Cargo.toml --locked --fail \
+            -c .github/evora/about.toml -o "$RUNNER_TEMP/evora-about/THIRD-PARTY-LICENSES.txt" \
+            .github/evora/third-party-licenses.hbs
+          f="$RUNNER_TEMP/evora-about/THIRD-PARTY-LICENSES.txt"
+          [ -s "$f" ] || { echo "::error::cargo-about n'a rien produit"; exit 1; }
+          echo "THIRD-PARTY-LICENSES.txt : $(wc -c < "$f") octets, $(grep -c '^- .* crates)$' "$f") licences, $(grep -cE '^- [A-Za-z0-9_-]+ [0-9]' "$f") mentions de crates"
+          sed -n '/^Overview/,/^---/p' "$f"
+
       - name: Package the static site
         id: pkg
         env:
           NAME: ${{ steps.meta.outputs.name }}
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
           site="target/web/dist"
@@ -161,23 +238,126 @@ jobs:
           mkdir -p "$work/$NAME/LICENSES" "$out"
           cp -R "$site/." "$work/$NAME/"
           # Aucune configuration d'hébergement (_headers, .htaccess) : l'hôte Evora pose ses en-têtes.
-          # Licences et mentions amont conservées (MIT OR Apache-2.0, NOTICE, polices OFL).
+          # Licences et mentions amont conservées (MIT OR Apache-2.0, NOTICE, polices OFL), licences
+          # tierces agrégées par cargo-about, mention Evora en texte simple.
           cp LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md "$work/$NAME/LICENSES/"
           cp assets/fonts/OFL-*.txt "$work/$NAME/LICENSES/"
-          # Archive reproductible : dates fixées au commit, ordre trié, sans attributs étendus.
-          epoch="$(git log -1 --format=%ct)"
+          cp "$RUNNER_TEMP/evora-about/THIRD-PARTY-LICENSES.txt" "$work/$NAME/LICENSES/"
+          sed -e "s/__TAG__/$TAG/g" -e "s/__COMMIT__/$(git rev-parse HEAD)/g" .github/evora/NOTICE-EVORA.txt > "$work/$NAME/LICENSES/NOTICE-EVORA.txt"
+          # Copies précompressées pour l'origine du moteur (Content-Encoding br et gzip).
           (
-            cd "$work"
-            find "$NAME" -exec touch -h -d "@$epoch" {} +
-            find "$NAME" -type f | LC_ALL=C sort | zip -q -X -9 "$out/$NAME.zip" -@
+            cd "$work/$NAME"
+            find . -type f -not -path './LICENSES/*' \( -name '*.wasm' -o -name '*.js' -o -name '*.mjs' -o -name '*.html' \
+              -o -name '*.svg' -o -name '*.webmanifest' -o -name '*.json' -o -name '*.css' \) -print0 | LC_ALL=C sort -z |
+              while IFS= read -r -d '' f; do
+                gzip -9 -n -k "$f"
+                brotli -q 11 -k "$f"
+              done
           )
-          (cd "$out" && sha256sum "$NAME.zip" > SHA256SUMS)
-          cat "$out/SHA256SUMS"
-          ls -l "$out"
           {
             echo "dir=$work/$NAME"
+            echo "work=$work"
             echo "out=$out"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Gates on the site (hosting files, ArtCraft marks, .br/.gz, CSP hashes, sizes)
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+        run: python3 .github/evora/gates.py site --dir "$DIR"
+
+      - name: Gate on the displayed catalogues (emoji and symbols, E10)
+        run: python3 .github/evora/gates.py catalog --repo . --stacks "$EVORA_FONT_STACKS" --mode "$EVORA_EMOJI_GATE"
+
+      - name: Smoke test (headless Chrome, engine framed by another origin)
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+        run: |
+          set -euo pipefail
+          smoke="$RUNNER_TEMP/evora-smoke"
+          mkdir -p "$smoke/parent"
+          PB=8602; PA=8601; PC=8603; PS=8604
+          hashes="$(grep -o "^'sha256-[^']*'" "$DIR/csp-hashes.txt" | tr '\n' ' ')"
+          [ -n "$hashes" ] || { echo "::error::csp-hashes.txt vide"; exit 1; }
+          # La CSP prévue pour les documents du moteur (apps/kinetika/CLAUDE.md §6.5), le parent
+          # tenant lieu d'origine Evora.
+          csp="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' ${hashes}; worker-src 'self' blob:; connect-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-ancestors http://127.0.0.1:$PB; object-src 'none'; base-uri 'none'"
+          sabotaged="${csp//sha256-/sha256-SABOTAGE}"
+          for p in "$PA" "$PC" "$PS"; do
+            cat > "$smoke/parent/engine-$p.html" <<HTML
+          <!doctype html>
+          <html><head><meta charset="utf-8"><title>Evora smoke parent</title><link rel="icon" href="data:,"></head>
+          <body style="margin:0"><iframe id="engine" src="http://127.0.0.1:$p/index.html?storage=memory&amp;nosw" style="border:0;width:1360px;height:860px" allow="fullscreen; clipboard-read; clipboard-write" sandbox="allow-scripts allow-same-origin"></iframe></body></html>
+          HTML
+          done
+          python3 .github/evora/serve.py --root "$smoke/parent" --port "$PB" > "$smoke/serve-parent.log" 2>&1 &
+          python3 .github/evora/serve.py --root "$DIR" --port "$PA" > "$smoke/serve-plain.log" 2>&1 &
+          python3 .github/evora/serve.py --root "$DIR" --port "$PC" --header "Content-Security-Policy: $csp" > "$smoke/serve-csp.log" 2>&1 &
+          python3 .github/evora/serve.py --root "$DIR" --port "$PS" --header "Content-Security-Policy: $sabotaged" > "$smoke/serve-sabotage.log" 2>&1 &
+          for p in "$PB" "$PA" "$PC" "$PS"; do
+            for _ in $(seq 1 50); do
+              code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$p/" || true)"
+              [ "$code" != "000" ] && break
+              sleep 0.2
+            done
+            [ "$code" != "000" ] || { echo "::error::serveur du port $p muet"; exit 1; }
+          done
+          curl -fsSI "http://127.0.0.1:$PA/effectcraft_web_bg.wasm" | grep -i '^content-type'
+          echo "CSP prévue : $csp"
+          rc=0
+          node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-$PA.html" --engine="http://127.0.0.1:$PA" \
+            --label=cross-origin --out="$smoke" --terms="$EVORA_TERMS_GATE" || rc=1
+          node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-$PC.html" --engine="http://127.0.0.1:$PC" \
+            --label=csp --out="$smoke" --terms="$EVORA_TERMS_GATE" || rc=1
+          # Témoin saboté : sous une empreinte CSP fausse le moteur ne doit pas démarrer, et le test le dit.
+          if node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-$PS.html" --engine="http://127.0.0.1:$PS" \
+            --label=csp-sabotage --out="$smoke" --timeout=30000 --settle=500 > "$smoke/sabotage.out" 2>&1; then
+            echo "::error::témoin saboté : le test de fumée passe sous une empreinte CSP fausse"
+            rc=1
+          elif ! grep -q 'SMOKE_CSP .*script-src' "$smoke/sabotage.out"; then
+            cat "$smoke/sabotage.out"
+            echo "::error::témoin saboté : échec sans violation de script-src relevée"
+            rc=1
+          else
+            echo "Témoin saboté OK : $(grep '^SMOKE ' "$smoke/sabotage.out")"
+          fi
+          kill $(jobs -p) 2>/dev/null || true
+          exit "$rc"
+
+      - name: Archive (zip and SHA256SUMS)
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+          WORK: ${{ steps.pkg.outputs.work }}
+          OUT: ${{ steps.pkg.outputs.out }}
+          NAME: ${{ steps.meta.outputs.name }}
+        run: |
+          set -euo pipefail
+          # Archive reproductible : dates fixées au commit, ordre trié, sans attributs étendus ; les
+          # fichiers déjà compressés (.br, .gz, .png) sont stockés tels quels.
+          epoch="$(git log -1 --format=%ct)"
+          (
+            cd "$WORK"
+            find "$NAME" -exec touch -h -d "@$epoch" {} +
+            find "$NAME" -type f | LC_ALL=C sort | zip -q -X -9 -n .br:.gz:.png "$OUT/$NAME.zip" -@
+          )
+          cp "$DIR/csp-hashes.txt" "$OUT/csp-hashes.txt"
+          (cd "$OUT" && sha256sum "$NAME.zip" csp-hashes.txt > SHA256SUMS)
+          cat "$OUT/SHA256SUMS"
+          ls -l "$OUT"
+          {
+            echo "### Archive"
+            echo
+            echo "| Élément | Valeur |"
+            echo "|---|---|"
+            echo "| Commit | \`$(git rev-parse HEAD)\` |"
+            echo "| Archive | \`$NAME.zip\`, $(stat -c %s "$OUT/$NAME.zip") octets |"
+            echo "| SHA-256 | \`$(sha256sum "$OUT/$NAME.zip" | cut -d' ' -f1)\` |"
+            echo
+            echo '```'
+            (cd "$DIR" && find . -type f -printf '%10s  %P\n' | LC_ALL=C sort -k2)
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "ARCHIVE_FILES"
+          (cd "$DIR" && find . -type f -printf '%10s  %P\n' | LC_ALL=C sort -k2)
 
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -186,6 +366,7 @@ jobs:
           path: |
             ${{ steps.pkg.outputs.out }}/${{ steps.meta.outputs.name }}.zip
             ${{ steps.pkg.outputs.out }}/SHA256SUMS
+            ${{ steps.pkg.outputs.out }}/csp-hashes.txt
           if-no-files-found: error
           compression-level: 0
 
@@ -197,111 +378,12 @@ jobs:
           path: ${{ steps.pkg.outputs.out }}/SHA256SUMS
           if-no-files-found: error
 
-      # Les mesures ne bloquent pas (première passe) ; seul un garde-fou cassé (témoin en échec,
-      # erreur de script) rend le job rouge, pour qu'un contrôle muet ne passe jamais pour un vert.
-      - name: Guards (measures, not blocking in this first pass)
-        env:
-          DIR: ${{ steps.pkg.outputs.dir }}
-          OUT: ${{ steps.pkg.outputs.out }}
-          NAME: ${{ steps.meta.outputs.name }}
-          TAG: ${{ steps.meta.outputs.tag }}
-        run: |
-          set -uo pipefail
-          set +e
-          # grep rend 1 quand il ne trouve rien : les compteurs l'absorbent explicitement.
-          count()  { { grep -a -o -- "$1" "$2" 2>/dev/null || true; } | wc -l; }
-          counti() { { grep -a -o -i -- "$1" "$2" 2>/dev/null || true; } | wc -l; }
-          hosting_in() { (cd "$1" && find . \( -name '_headers' -o -name '.htaccess' -o -name '*.conf' \) -print | LC_ALL=C sort); }
-
-          # Témoins : chaque détecteur doit voir ce qu'on lui montre, sinon il est cassé.
-          fx="$RUNNER_TEMP/evora-guard-fixture"
-          mkdir -p "$fx/sub"
-          : > "$fx/_headers"; : > "$fx/sub/.htaccess"; : > "$fx/sub/site.conf"
-          printf 'xxArtCraftyy artcraft discord.gg/abc getartcraft.com' > "$fx/brand.bin"
-          w_host=$(hosting_in "$fx" | wc -l)
-          w_b=$(count 'ArtCraft' "$fx/brand.bin"); w_bi=$(counti 'artcraft' "$fx/brand.bin")
-          w_d=$(count 'discord.gg' "$fx/brand.bin"); w_g=$(counti 'getartcraft' "$fx/brand.bin")
-          if [ "$w_host" -ne 3 ] || [ "$w_b" -ne 1 ] || [ "$w_bi" -ne 3 ] || [ "$w_d" -ne 1 ] || [ "$w_g" -ne 1 ]; then
-            echo "::error::témoins en échec : hébergement $w_host/3, ArtCraft $w_b/1, artcraft $w_bi/3, discord.gg $w_d/1, getartcraft $w_g/1"
-            exit 1
-          fi
-          echo "Témoins OK : hébergement 3/3, ArtCraft 1/1, artcraft 3/3, discord.gg 1/1, getartcraft 1/1"
-
-          wasm="$DIR/effectcraft_web_bg.wasm"
-          [ -f "$wasm" ] || { echo "::error::$wasm manquant"; exit 1; }
-          raw=$(stat -c %s "$wasm")
-          gz=$(gzip -9 -c "$wasm" | wc -c)
-          if command -v brotli >/dev/null; then
-            br="$(brotli -c -q 11 "$wasm" | wc -c) octets"
-          else
-            br="non mesuré (brotli absent du runner)"
-          fi
-          zipsize=$(stat -c %s "$OUT/$NAME.zip")
-          hosting=$(hosting_in "$DIR")
-          site_files=$(cd "$DIR" && find . -type f -not -path './LICENSES/*' | LC_ALL=C sort)
-          nfiles=$(echo "$site_files" | wc -l)
-          brand_site=0; brand_cs=0; discord=0; getac=0; brand_rows=""
-          for f in $site_files; do
-            n=$(count 'ArtCraft' "$DIR/$f"); ni=$(counti 'artcraft' "$DIR/$f")
-            d=$(count 'discord.gg' "$DIR/$f"); g=$(counti 'getartcraft' "$DIR/$f")
-            brand_cs=$((brand_cs + n)); brand_site=$((brand_site + ni)); discord=$((discord + d)); getac=$((getac + g))
-            if [ "$ni" -gt 0 ] || [ "$d" -gt 0 ] || [ "$g" -gt 0 ]; then
-              brand_rows="$brand_rows| \`${f#./}\` | $n | $ni | $d | $g |"$'\n'
-            fi
-          done
-          brand_lic=0
-          for f in "$DIR"/LICENSES/*; do brand_lic=$((brand_lic + $(counti 'artcraft' "$f"))); done
-          if [ -z "$hosting" ]; then hosting_cell="aucun"; else hosting_cell="$(echo "$hosting" | tr '\n' ' ')"; fi
-          wasm_opt="$(command -v wasm-opt >/dev/null && wasm-opt --version || echo 'absent (non appliqué)')"
-
-          {
-            echo "## Evora effectcraft web $TAG"
-            echo
-            echo "| Élément | Valeur |"
-            echo "|---|---|"
-            echo "| Branche | \`$GITHUB_REF_NAME\` |"
-            echo "| Commit | \`$(git rev-parse HEAD)\` |"
-            echo "| rustc | \`$(rustc --version)\` |"
-            echo "| wasm-bindgen | \`$(wasm-bindgen --version)\` |"
-            echo "| wasm-opt | $wasm_opt |"
-            echo "| Archive | \`$NAME.zip\`, $zipsize octets, $nfiles fichiers de site |"
-            echo "| SHA-256 | \`$(cut -d' ' -f1 "$OUT/SHA256SUMS")\` |"
-            echo
-            echo "### Garde-fous (mesures non bloquantes pour cette première passe)"
-            echo
-            echo "Témoins : hébergement 3/3, ArtCraft 1/1, artcraft 3/3, discord.gg 1/1, getartcraft 1/1."
-            echo
-            echo "| Garde-fou | Mesure | Cible |"
-            echo "|---|---|---|"
-            echo "| Fichiers d'hébergement (\`_headers\`, \`.htaccess\`, \`*.conf\`) | $hosting_cell | aucun |"
-            echo "| \`effectcraft_web_bg.wasm\` brut | $raw octets | ligne de base |"
-            echo "| \`effectcraft_web_bg.wasm\` gzip -9 | $gz octets | ligne de base |"
-            echo "| \`effectcraft_web_bg.wasm\` brotli -q 11 | $br | ligne de base |"
-            echo "| « ArtCraft » (casse exacte) dans le site | $brand_cs | 0 après E1 |"
-            echo "| « artcraft » (casse ignorée) dans le site | $brand_site | 0 après E1 |"
-            echo "| « discord.gg » dans le site | $discord | 0 après E1/E7 |"
-            echo "| « getartcraft » (casse ignorée) dans le site | $getac | 0 après E1 |"
-            echo "| « artcraft » dans \`LICENSES/\` (mentions de copyright) | $brand_lic | conservées |"
-            echo
-            if [ -n "$brand_rows" ]; then
-              echo "#### Marques par fichier du site (mesure de la cible E1)"
-              echo
-              echo "| Fichier | ArtCraft | artcraft (casse ignorée) | discord.gg | getartcraft |"
-              echo "|---|---|---|---|---|"
-              printf '%s' "$brand_rows"
-              echo
-            fi
-            echo "#### Contenu de l'archive"
-            echo
-            echo '```'
-            (cd "$DIR" && find . -type f -printf '%10s  %P\n' | LC_ALL=C sort -k2)
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          [ -z "$hosting" ] || echo "::warning::fichiers d'hébergement dans l'archive : $hosting_cell"
-          [ "$brand_site" -eq 0 ] || echo "::warning::$brand_site occurrence(s) de « artcraft » dans le site (cible du patch E1)"
-          echo "GUARDS wasm_raw=$raw wasm_gzip=$gz wasm_brotli=\"$br\" zip=$zipsize files=$nfiles hosting=\"$hosting_cell\" ArtCraft=$brand_cs artcraft_i=$brand_site discord=$discord getartcraft=$getac licenses_artcraft=$brand_lic"
-          if [ -n "$brand_rows" ]; then printf 'GUARDS_BRAND\n%s' "$brand_rows"; fi
-          echo "GUARDS_FILES"
-          (cd "$DIR" && find . -type f -printf '%10s  %P\n' | LC_ALL=C sort -k2)
-          exit 0
+      # Rapport du test de fumée (JSON, captures), aussi en cas d'échec, pour le diagnostic.
+      - name: Upload smoke report
+        if: always() && steps.meta.outputs.name != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.meta.outputs.name }}-smoke
+          path: ${{ runner.temp }}/evora-smoke/
+          if-no-files-found: warn
+          retention-days: 30

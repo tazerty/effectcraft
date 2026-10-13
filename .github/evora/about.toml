@@ -1,0 +1,18 @@
+# cargo-about configuration of the Evora fork (written by Evora): the third-party licences of the
+# crates compiled into the web build, aggregated into LICENSES/THIRD-PARTY-LICENSES.txt of the
+# artefact by .github/workflows/evora-web.yml. MIT first: a crate offered under "MIT OR
+# Apache-2.0" is listed under MIT, the licence the fork proposes for its own changes (D-16).
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+]
+targets = ["wasm32-unknown-unknown"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
