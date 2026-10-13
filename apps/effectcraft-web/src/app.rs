@@ -118,7 +118,35 @@ impl eframe::App for WebApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+        block_external_links(ui.ctx(), &mut self.app);
     }
+}
+
+/// Evora (E7): the engine opens no external page. Help ▸ links (help.docs, help.appPage,
+/// help.github, help.onlineTutorials, help.reportIssue, help.sibling), the trained models'
+/// project and licence pages, the credits and any hyperlink all end in egui's `OpenUrl` command,
+/// which the browser runner turns into `window.open`: they are dropped here, at the end of the
+/// frame, before the runner sees them. The Evora shell owns every link out of the editor (and its
+/// iframe has no `allow-popups`). The URL is logged and the status line says why nothing opened.
+fn block_external_links(ctx: &egui::Context, app: &mut EffectcraftApp) {
+    let blocked: Vec<String> = ctx.output_mut(|o| {
+        let mut urls = Vec::new();
+        o.commands.retain(|c| match c {
+            egui::OutputCommand::OpenUrl(open) => {
+                urls.push(open.url.clone());
+                false
+            }
+            _ => true,
+        });
+        urls
+    });
+    if blocked.is_empty() {
+        return;
+    }
+    for url in &blocked {
+        log::info!("Evora build: external link not opened: {url}");
+    }
+    app.ui.status = "External links are not opened in this editor.".into();
 }
 
 fn query() -> Option<web_sys::UrlSearchParams> {
