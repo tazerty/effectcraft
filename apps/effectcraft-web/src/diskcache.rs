@@ -62,6 +62,8 @@ struct State {
     prefetch: LayerPrefetch,
     layer_hits: u64,
     layer_writes: u64,
+    /// Evora (E5): the host purged browser storage; the cache is off for good.
+    frozen: bool,
 }
 
 thread_local! {
@@ -88,6 +90,9 @@ pub fn init() {
                 entries.sort_by(|a, b| a.0.total_cmp(&b.0));
                 ST.with(|s| {
                     let mut s = s.borrow_mut();
+                    if s.frozen {
+                        return;
+                    }
                     for (_, kind, key, bytes) in entries {
                         s.index.insert(kind, key, bytes);
                     }
@@ -172,8 +177,20 @@ pub fn configure(enabled: bool, max_gb: u32, quota: Option<u64>) {
 pub fn active() -> bool {
     ST.with(|s| {
         let s = s.borrow();
-        s.loaded && s.available && s.enabled
+        s.loaded && s.available && s.enabled && !s.frozen
     })
+}
+
+/// Evora (E5): the host's `evora:purge` deletes browser storage: the cache stops for good (no
+/// lookup, read, write request or eviction from now on); the purge deletes its folder.
+pub fn freeze() {
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        s.frozen = true;
+        s.available = false;
+        s.index.clear();
+        s.prefetch.clear();
+    });
 }
 
 /// The frame of `key` is cached.
@@ -212,6 +229,10 @@ pub async fn read(key: u128) -> Option<disk_cache::Frame8> {
 pub fn stored(key: u128, bytes: u64, layer: bool) {
     ST.with(|s| {
         let mut s = s.borrow_mut();
+        // Evora (E5): after the host's purge a late report adds nothing.
+        if s.frozen {
+            return;
+        }
         s.index.insert(if layer { Kind::Layer } else { Kind::Frame }, key, bytes);
         s.writes += 1;
         if layer {

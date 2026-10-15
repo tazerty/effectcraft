@@ -32,6 +32,15 @@ extern "C" {
     fn store_delete(key: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = storeEstimate)]
     pub(crate) fn store_estimate() -> js_sys::Promise;
+    /// Evora (E5): name every browser store after `ns` ("" for none); `off`: keep nothing in
+    /// browser storage (memory only). Set by the host bridge from `evora:init`, and in a worker
+    /// from the page's init message; never from a URL.
+    #[wasm_bindgen(js_name = storageConfigure)]
+    pub(crate) fn storage_configure(ns: &str, off: bool) -> bool;
+    /// Evora (E5): delete the engine's browser stores (`mode`: "others", "current" or "all");
+    /// with `stop`, stop every writer first, for good. Resolves with `{purged, remaining}`.
+    #[wasm_bindgen(js_name = storagePurge)]
+    pub(crate) fn storage_purge(mode: &str, stop: bool) -> js_sys::Promise;
 }
 
 thread_local! {
@@ -45,6 +54,21 @@ thread_local! {
     static RETRY_PENDING: Cell<bool> = const { Cell::new(false) };
     static SNAP: Cell<(u64, f64)> = const { Cell::new((u64::MAX, 0.0)) };
     static LAST_META: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// Evora (E5): the host purged browser storage; nothing is written to it any more.
+    static FROZEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Evora (E5): the host's `evora:purge` is deleting browser storage: from now on nothing is
+/// written to it (pending changes are dropped, no flush, no session snapshot); the store stays
+/// in memory.
+pub fn freeze() {
+    FROZEN.with(|f| f.set(true));
+    let _ = STORE.lock().take_pending();
+}
+
+/// Browser storage was purged ([`freeze`]).
+pub fn frozen() -> bool {
+    FROZEN.with(|f| f.get())
 }
 
 const RETRY_FIRST_MS: i32 = 2_000;
@@ -91,6 +115,16 @@ pub async fn load(prefer: &str) -> Result<usize, String> {
 
 /// Write pending changes to the browser storage (in the background; one flush at a time).
 pub fn schedule_flush() {
+    if frozen() {
+        // Evora (E5): purged; the change stays in memory only, and waiters hear it isn't stored.
+        let _ = STORE.lock().take_pending();
+        let waiters = FLUSH_WAITERS.with(|w| std::mem::take(&mut *w.borrow_mut()));
+        let e: JsValue = js_sys::Error::new("browser storage was purged").into();
+        for (_, reject) in waiters {
+            let _ = reject.call1(&JsValue::NULL, &e);
+        }
+        return;
+    }
     if FLUSHING.with(|f| f.replace(true)) {
         return; // the running flush picks the new changes up
     }
@@ -99,11 +133,19 @@ pub fn schedule_flush() {
         let mut failed: Vec<String> = vec![];
         let mut error = None;
         loop {
+            // Evora (E5): a purge stops the writes under way.
+            if frozen() {
+                break;
+            }
             let pending: Vec<_> = STORE.lock().take_pending().into_iter().filter(|p| !failed.contains(&p.key)).collect();
             if pending.is_empty() {
                 break;
             }
             for p in pending {
+                // Evora (E5): nor the rest of this batch.
+                if frozen() {
+                    break;
+                }
                 let r = match &p.data {
                     Some(d) => JsFuture::from(store_put(&p.key, js_sys::Uint8Array::from(&d[..]), p.modified)).await,
                     None => JsFuture::from(store_delete(&p.key)).await,
@@ -186,6 +228,10 @@ pub fn config() -> WebConfig {
 /// Record the open project and editor state when they changed (checked at most every
 /// `min_secs`).
 pub fn snapshot(s: &Session, now: f64, min_secs: f64) {
+    // Evora (E5): nothing is recorded once the host purged browser storage.
+    if frozen() {
+        return;
+    }
     let (rev, at) = SNAP.with(|c| c.get());
     if now - at < min_secs {
         return;

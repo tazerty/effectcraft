@@ -238,13 +238,21 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     let canvas: web_sys::HtmlCanvasElement = doc.get_element_by_id(&canvas_id).ok_or("no canvas")?.dyn_into()?;
     let empty = query_flag("empty");
     let home = query_flag("home");
-    // Evora (E4): with `?host=evora` the engine first announces itself (`evora:ready`) to the
-    // parent page `evora-host.json` admits and waits for its `evora:init`, before it opens
-    // browser storage. Without an admitted parent the bridge stays mute. Without `?host=evora`
+    // Evora (E4, E5): with `?host=evora` the engine first announces itself (`evora:ready`) to the
+    // parent page `evora-host.json` admits and waits for its `evora:init`, before it touches
+    // browser storage. The storage namespace comes from that message only (never from the URL);
+    // the other namespaces' stores and the un-namespaced ones are deleted before the engine opens
+    // its own. Without an admitted parent, without a namespace or in the memory mode
+    // (`?storage=memory`), the engine keeps nothing in browser storage. Without `?host=evora`
     // nothing changes.
     let host = query_value("host").as_deref() == Some("evora");
     let memory = query_value("storage").as_deref() == Some("memory");
     let boot = if host { crate::ehp::boot(memory).await } else { None };
+    if host {
+        let ns = boot.as_ref().and_then(|b| b.storage_ns.clone()).unwrap_or_default();
+        let purge = boot.as_ref().is_some_and(|b| b.purge);
+        crate::ehp::prepare_storage(ns, !memory, purge).await;
+    }
     // Browser storage: settings, recent projects, imported media, saved projects, auto-saves and
     // the last session come back.
     let t0 = js_sys::Date::now();

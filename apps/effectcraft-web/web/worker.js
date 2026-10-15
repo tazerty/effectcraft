@@ -25,6 +25,9 @@ self.onmessage = (e) => {
   if (m.type === "init") {
     ready = (async () => {
       await init({ module_or_path: m.module ?? new URL("effectcraft_web_bg.wasm", m.base) });
+      // Evora (E5): the page's storage settings (the host's namespace, or browser storage off),
+      // from this init message only.
+      ec.workerStorage(typeof m.storageNs === "string" ? m.storageNs : "", m.storageOff === true);
       ec.workerInit();
       if (m.frames) await ec.workerFrameInit(!!m.gpu);
       else await ec.workerJobInit(!!m.gpu);

@@ -199,6 +199,25 @@ impl RemoteFrames for WebFrames {
     }
 }
 
+/// Evora (E5): the host's `evora:purge` deletes browser storage, which the frame workers write
+/// (the disk cache): they stop first. Each is marked gone and its pending frame fails, so frames
+/// render on the page's thread from now on; `js/host.js` (`storagePurge`) terminates them.
+pub fn stop_workers() {
+    let pending: Vec<RemoteDone> = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        s.workers
+            .iter_mut()
+            .filter_map(|w| {
+                w.alive = false;
+                w.busy.take().map(|(_, d)| d)
+            })
+            .collect()
+    });
+    for done in pending {
+        done(Err("browser storage was purged: the frame workers stopped".into()));
+    }
+}
+
 /// A message from frame worker `index`: a JSON [`FrameReply`] (with the pixels in `bytes`), or
 /// `error` when the worker died.
 fn on_message(index: u32, json: JsValue, bytes: JsValue, error: JsValue) {
