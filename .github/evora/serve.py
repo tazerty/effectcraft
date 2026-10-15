@@ -3,7 +3,9 @@
 
 Serves ROOT on 127.0.0.1:PORT with explicit media types (application/wasm…), `Cache-Control:
 no-store`, and optional extra headers (`--header 'Name: value'`, repeatable), e.g. the engine's
-Content-Security-Policy. No directory listing.
+Content-Security-Policy. No directory listing. `--map /path=FILE` (repeatable) serves FILE at
+/path in place of ROOT's: the bench's own pages on the engine's origin, and evora-host.json as
+Evora's provisioning would write it (patch E4), the artefact itself untouched.
 """
 
 import argparse
@@ -24,10 +26,14 @@ TYPES = {
 }
 
 
-def handler(root, extra):
+def handler(root, extra, mapped):
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
             super().__init__(*a, directory=root, **kw)
+
+        def translate_path(self, path):
+            target = mapped.get(path.split("?", 1)[0].split("#", 1)[0])
+            return target if target is not None else super().translate_path(path)
 
         def guess_type(self, path):
             return TYPES.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
@@ -53,13 +59,20 @@ def main():
     p.add_argument("--root", required=True)
     p.add_argument("--port", type=int, required=True)
     p.add_argument("--header", action="append", default=[])
+    p.add_argument("--map", action="append", default=[])
     a = p.parse_args()
+    mapped = {}
+    for m in a.map:
+        url, _, path = m.partition("=")
+        if not url.startswith("/") or not os.path.isfile(path):
+            p.error(f"--map {m}: /path=FILE expected (FILE must exist)")
+        mapped[url] = os.path.abspath(path)
     extra = []
     for h in a.header:
         name, _, value = h.partition(":")
         extra.append((name.strip(), value.strip()))
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), handler(os.path.abspath(a.root), extra))
-    print(f"serving {a.root} on http://127.0.0.1:{a.port}/ with {len(extra)} extra header(s)", flush=True)
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), handler(os.path.abspath(a.root), extra, mapped))
+    print(f"serving {a.root} on http://127.0.0.1:{a.port}/ with {len(extra)} extra header(s), mapped {sorted(mapped)}", flush=True)
     srv.serve_forever()
 
 

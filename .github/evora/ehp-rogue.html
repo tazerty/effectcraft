@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>Evora EHP smoke rogue</title><link rel="icon" href="data:,"></head>
+<body>
+<script>
+"use strict";
+// Banc « pont-ehp » (écrit par Evora ; patch E4) : une fenêtre qui n'est pas le parent du moteur,
+// servie sur l'origine du parent (contrôle de la source) ou sur une origine que evora-host.json
+// n'admet pas (contrôle de l'origine). Sur l'ordre de la page parente, elle envoie au moteur la même
+// demande evora:request-save qu'une coquille, et le dit à la page parente : le moteur ne doit pas
+// y répondre.
+const q = new URLSearchParams(location.search);
+const ENGINE = q.get("engine");
+const PARENT = q.get("parent");
+addEventListener("message", (e) => {
+  const d = e.data;
+  if (e.source !== parent || e.origin !== PARENT || !d || d.go !== true || typeof d.id !== "string") return;
+  parent.frames[0].postMessage({ v: 1, type: "evora:request-save", id: d.id, payload: { reason: "user" } }, ENGINE);
+  parent.postMessage({ harness: "rogue", id: d.id, origin: location.origin }, PARENT);
+});
+</script>
+</body>
+</html>
