@@ -50,6 +50,11 @@ web-sys = { version = "0.3", features = [
     "HtmlElement",
     "HtmlInputElement",
     "Location",
+    # Evora (E4): the host protocol bridge (src/ehp.rs).
+    "MessageEvent",
+    "RequestCache",
+    "RequestInit",
+    "Response",
     "Url",
     "UrlSearchParams",
     "Window",

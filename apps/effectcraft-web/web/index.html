@@ -82,8 +82,10 @@
       // A frame rendered in a frame worker (its GPU by default) vs the page's CPU: {maxDiff, meanDiff, over4, …}.
       workerFrameCheck: (params) => ec.workerFrameCheck(params ?? {}).then(JSON.parse),
     };
-    // Offline start and install (PWA): the service worker caches the app's files.
-    if ("serviceWorker" in navigator && !new URLSearchParams(location.search).has("nosw")) {
+    // Offline start and install (PWA): the service worker caches the app's files. Evora (E4): never
+    // in the host bridge (`?host=evora`), whose engine keeps nothing for itself in the browser.
+    const query = new URLSearchParams(location.search);
+    if ("serviceWorker" in navigator && !query.has("nosw") && query.get("host") !== "evora") {
       navigator.serviceWorker.register("sw.js").catch((e) => console.warn("service worker:", e));
     }
     try {

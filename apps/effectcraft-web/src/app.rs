@@ -108,6 +108,8 @@ impl eframe::App for WebApp {
         if self.persist {
             persist::snapshot(&self.app.session, ctx.input(|i| i.time), 1.0);
         }
+        // Evora (E4): the host hears when its document becomes modified or saved (`evora:dirty`).
+        crate::ehp::dirty(self.app.session.is_dirty());
         api::set_info("gpu", json!({"compositor": self.app.gpu_adapter(), "viewerOnGpu": self.app.viewer_on_gpu()}));
         api::set_info("frameWorkers", frames::stats());
         // Settings ▸ Disk ▸ Disk Cache (frames in the Origin Private File System).
@@ -190,8 +192,9 @@ pub fn session() -> Session {
 /// engine's catalog code. `zh-Hans` (also `zh-cn`, `zh`) → `zh-hans`; fr, de, es, ru, ja and en
 /// keep their code; ar, hi, id, it, ko and tr, which the engine has no catalog for, → `en` (the
 /// Evora shell shows its banner). `pt` → none: the variant (Brazilian or not) awaits decision
-/// D-23, so the engine keeps its default. Anything else → none.
-fn evora_language(code: &str) -> Option<&'static str> {
+/// D-23, so the engine keeps its default. Anything else → none. The host bridge (E4) maps
+/// `evora:init` and `evora:lang`'s `engineLang` through it too.
+pub(crate) fn evora_language(code: &str) -> Option<&'static str> {
     match code.trim().to_ascii_lowercase().as_str() {
         "en" => Some("en"),
         "fr" => Some("fr"),
@@ -235,6 +238,13 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     let canvas: web_sys::HtmlCanvasElement = doc.get_element_by_id(&canvas_id).ok_or("no canvas")?.dyn_into()?;
     let empty = query_flag("empty");
     let home = query_flag("home");
+    // Evora (E4): with `?host=evora` the engine first announces itself (`evora:ready`) to the
+    // parent page `evora-host.json` admits and waits for its `evora:init`, before it opens
+    // browser storage. Without an admitted parent the bridge stays mute. Without `?host=evora`
+    // nothing changes.
+    let host = query_value("host").as_deref() == Some("evora");
+    let memory = query_value("storage").as_deref() == Some("memory");
+    let boot = if host { crate::ehp::boot(memory).await } else { None };
     // Browser storage: settings, recent projects, imported media, saved projects, auto-saves and
     // the last session come back.
     let t0 = js_sys::Date::now();
@@ -248,10 +258,13 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     api::set_info("storage", json!({"backend": persist::backend(), "entries": stored, "loadMs": js_sys::Date::now() - t0}));
     audio::install_unlock();
     browse::restore();
-    diskcache::init();
+    // Evora (E4): no disk cache folder when the host turns the cache off (`evora:init.prefs`).
+    if boot.as_ref().and_then(|b| b.disk_cache) != Some(false) {
+        diskcache::init();
+    }
     storage::refresh();
     let runner = eframe::WebRunner::new();
-    runner
+    let started = runner
         .start(
             canvas,
             eframe::WebOptions::default(),
@@ -290,6 +303,10 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 if let Some(mode) = query_value("theme").filter(|m| m == "light" || m == "dark") {
                     session.prefs.appearance.appearance_mode = mode;
                 }
+                // Evora (E4): what `evora:init` imposes (language, theme, disk cache). Not saved.
+                if let Some(b) = &boot {
+                    crate::ehp::apply_init(&mut session, b);
+                }
                 let recovery = session.begin_recovery();
                 // `?empty`: a blank project; `?demo`: the demo project; otherwise the last visit's
                 // project (the demo on a first visit).
@@ -322,7 +339,18 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 Ok(Box::new(WebApp { app, persist: !empty }))
             }),
         )
-        .await?;
+        .await;
+    if let Err(e) = started {
+        // Evora (E4): `evora:failed {code}` to an admitted host.
+        if host {
+            crate::ehp::failed(&e);
+        }
+        return Err(e);
+    }
+    // Evora (E4): the editor runs with what `evora:init` set: accept it (`evora:ack`).
+    if host {
+        crate::ehp::init_applied();
+    }
     // Hide the loading message once the app runs.
     if let Some(el) = doc.get_element_by_id("loading") {
         el.remove();
