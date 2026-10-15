@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Evora EHP smoke parent</title>
+<link rel="icon" href="data:,">
+</head>
+<body style="margin:0;background:#fff">
+<!-- The engine is the first frame: the rogue pages reach it as parent.frames[0]. -->
+<iframe id="engine" style="border:0;width:1360px;height:860px" allow="fullscreen; clipboard-read; clipboard-write" sandbox="allow-scripts allow-same-origin"></iframe>
+<iframe id="rogue-source" style="border:0;width:8px;height:8px"></iframe>
+<iframe id="rogue-origin" style="border:0;width:8px;height:8px"></iframe>
+<script>
+"use strict";
+// Banc « pont-ehp » (écrit par Evora ; patchs E4 et E5) : une coquille minimale qui parle EHP v1
+// (HOST-PROTOCOL.md d'Evora) au moteur, servi par une autre origine qui admet celle-ci dans
+// evora-host.json. Le cadre du moteur charge d'abord la page d'amorçage du banc (evora-seed.html,
+// sur l'origine du moteur), qui sème des magasins étrangers puis ouvre le moteur. La coquille
+// vérifie source et origine, journalise tout ce qui arrive, répond à evora:ready par un
+// evora:init de version 2 (doit rester sans réponse) puis par un evora:init valide, ouvre un
+// petit projet en octets, répond à chaque evora:save par un evora:saved ; le reste est piloté par
+// smoke.mjs (window.__ehp.step).
+const q = new URLSearchParams(location.search);
+const ENGINE = q.get("engine");
+const ROGUE = q.get("rogue");
+const NS = q.get("ns");
+const EQ = q.get("q") || "";
+const PREFS = JSON.parse(q.get("prefs") || "{}");
+const MAX_BYTES = 4 * 1024 * 1024;
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+let serial = 0;
+const ulid = () => {
+  serial += 1;
+  return "01JZ".padEnd(24, "Z") + CROCKFORD[(serial >> 5) % 32] + CROCKFORD[serial % 32];
+};
+// A project as small as the engine reads it (crates/project: schema 2, no item).
+const PROJECT = JSON.stringify({
+  schema: 2,
+  settings: { bit_depth: "Bpc8", linearize: false, time_display: "Timecode", frame_start: 0, audio_sample_rate: 48000, comment: "evora-smoke" },
+  items: {},
+  next_id: 1,
+});
+const S = (window.__ehp = { log: [], ids: {}, harness: [], saves: [], acks: {}, version: 1 });
+const engine = document.getElementById("engine");
+const rogueSource = document.getElementById("rogue-source");
+const rogueOrigin = document.getElementById("rogue-origin");
+// Wall-clock milliseconds: the engine's frame stamps its deletions on the same clock (smoke.mjs).
+const now = () => Date.now();
+const send = (m, transfer) => engine.contentWindow.postMessage(m, ENGINE, transfer || []);
+// A payload for the log: binary data as {arrayBuffer, byteLength}, a view or a shared buffer flagged.
+const describe = (v) =>
+  JSON.parse(
+    JSON.stringify(v === undefined ? null : v, (k, x) => {
+      if (x instanceof ArrayBuffer) return { arrayBuffer: true, byteLength: x.byteLength };
+      if (typeof SharedArrayBuffer !== "undefined" && x instanceof SharedArrayBuffer) return { sharedArrayBuffer: true };
+      if (ArrayBuffer.isView(x)) return { view: true };
+      return x;
+    }),
+  );
+
+addEventListener("message", (e) => {
+  const d = e.data;
+  const at = now();
+  const fromEngineFrame = e.source === engine.contentWindow;
+  const fromRogue = e.source === rogueSource.contentWindow || e.source === rogueOrigin.contentWindow;
+  // The bench's own reports (the seed page before the engine starts, the rogue frames): not EHP.
+  if (d && typeof d === "object" && typeof d.harness === "string" && ((fromEngineFrame && d.harness === "seed" && !S.ids.ready) || fromRogue)) {
+    S.harness.push({ at, origin: e.origin, report: describe(d) });
+    return;
+  }
+  const fromEngine = fromEngineFrame && e.origin === ENGINE;
+  const plain = d !== null && typeof d === "object" && Object.getPrototypeOf(d) === Object.prototype;
+  S.log.push({
+    at,
+    origin: e.origin,
+    fromEngine,
+    plain,
+    keys: plain ? Object.keys(d) : [],
+    v: plain ? d.v : null,
+    type: plain ? d.type : null,
+    id: plain ? d.id : null,
+    re: plain && d.re !== undefined ? d.re : null,
+    payload: plain ? describe(d.payload) : null,
+  });
+  if (!fromEngine || !plain || d.v !== 1) return;
+  const p = d.payload || {};
+  if (d.type === "evora:ready") {
+    if (S.ids.ready) return;
+    S.ids.ready = d.id;
+    S.ids.v2init = ulid();
+    send({ v: 2, type: "evora:init", id: S.ids.v2init, re: d.id, payload: {} });
+    S.ids.init = ulid();
+    send({
+      v: 1,
+      type: "evora:init",
+      id: S.ids.init,
+      re: d.id,
+      payload: {
+        lang: "fr", engineLang: "fr", theme: "dark", accent: "#4F46E5", readOnly: false, storageNs: NS,
+        capabilities: Array.isArray(p.capabilities) ? p.capabilities : [], prefs: PREFS,
+        limits: { maxDocumentBytes: MAX_BYTES, maxExportBytes: MAX_BYTES },
+      },
+    });
+  } else if (d.type === "evora:ack") {
+    S.acks[d.re] = { at, payload: describe(p) };
+    if (d.re === S.ids.init && p.ok === true && !S.ids.open) {
+      S.ids.doc = ulid();
+      S.ids.open = ulid();
+      const bytes = new TextEncoder().encode(PROJECT).buffer;
+      send({ v: 1, type: "evora:open", id: S.ids.open, payload: { docRef: S.ids.doc, name: "evora-smoke.ecproj", bytes } }, [bytes]);
+    }
+  } else if (d.type === "evora:save") {
+    const entry = {
+      at, id: d.id, re: d.re !== undefined ? d.re : null, docRef: p.docRef, name: p.name, saveAs: p.saveAs,
+      arrayBuffer: p.bytes instanceof ArrayBuffer, byteLength: p.bytes instanceof ArrayBuffer ? p.bytes.byteLength : -1, items: null,
+    };
+    try {
+      entry.items = Object.keys(JSON.parse(new TextDecoder().decode(p.bytes)).items || {}).length;
+    } catch (err) {
+      entry.parseError = String(err);
+    }
+    // The host's answer: a new version; a Save As is a new document (§7.3).
+    S.version += 1;
+    const answer = { ok: true, version: S.version };
+    if (p.saveAs === true) {
+      S.ids.copy = ulid();
+      answer.docRef = S.ids.copy;
+    }
+    entry.answer = answer;
+    S.saves.push(entry);
+    send({ v: 1, type: "evora:saved", id: ulid(), re: d.id, payload: answer });
+  }
+});
+
+const request = (key, type, payload) => {
+  S.ids[key] = ulid();
+  send({ v: 1, type, id: S.ids[key], payload });
+  return S.ids[key];
+};
+S.step = {
+  // The same evora:request-save from two windows that aren't the engine's parent (one on this
+  // origin, one on an origin evora-host.json doesn't admit) and in version 2: none may be answered.
+  rogue() {
+    S.ids.rogueSource = ulid();
+    S.ids.rogueOrigin = ulid();
+    rogueSource.contentWindow.postMessage({ go: true, id: S.ids.rogueSource }, location.origin);
+    rogueOrigin.contentWindow.postMessage({ go: true, id: S.ids.rogueOrigin }, ROGUE);
+    S.ids.v2save = ulid();
+    send({ v: 2, type: "evora:request-save", id: S.ids.v2save, payload: { reason: "user", docRef: S.ids.doc } });
+    return true;
+  },
+  // The witness: the same request from the parent, answered (nothing to save yet: "clean").
+  clean: () => request("clean", "evora:request-save", { reason: "user", docRef: S.ids.doc }),
+  save: () => request("save", "evora:request-save", { reason: "autosave", docRef: S.ids.doc }),
+  live() {
+    request("theme", "evora:theme", { theme: "light", accent: "#4F46E5" });
+    request("lang", "evora:lang", { lang: "de", engineLang: "de" });
+    return true;
+  },
+  purge: () => request("purge", "evora:purge", { scope: "current" }),
+};
+
+engine.src = `${ENGINE}/evora-seed.html?parent=${encodeURIComponent(location.origin)}&own=${encodeURIComponent(NS)}&q=${encodeURIComponent(EQ)}`;
+const rogueQuery = `?engine=${encodeURIComponent(ENGINE)}&parent=${encodeURIComponent(location.origin)}`;
+rogueSource.src = `${location.origin}/ehp-rogue.html${rogueQuery}`;
+rogueOrigin.src = `${ROGUE}/ehp-rogue.html${rogueQuery}`;
+</script>
+</body>
+</html>
