@@ -173,6 +173,15 @@ pub fn worker_init() {
     SESSION.with(|c| *c.borrow_mut() = Some(s));
 }
 
+/// Evora (E5): the page's storage settings for this worker's browser stores (the disk cache),
+/// from the page's init message, never from a URL: the namespace of the host's `evora:init` (or
+/// none), and `off` when the engine keeps nothing in browser storage. Called once by
+/// `web/worker.js` before the worker starts.
+#[wasm_bindgen(js_name = workerStorage)]
+pub fn worker_storage(ns: String, off: bool) {
+    crate::persist::storage_configure(&ns, off);
+}
+
 /// The worker's media pool (footage files sent by the page).
 pub fn pool() -> Arc<effectcraft_media::MediaPool> {
     POOL.with(|p| p.borrow().clone()).unwrap_or_else(|| Arc::new(effectcraft_media::MediaPool::new()))
