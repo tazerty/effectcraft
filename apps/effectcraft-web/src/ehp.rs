@@ -1,4 +1,4 @@
-//! Evora (E4): the native bridge of the Evora host protocol, EHP v1
+//! Evora (E4, E5): the native bridge of the Evora host protocol, EHP v1
 //! (`apps/creative/HOST-PROTOCOL.md` in Evora), in Rust (web-sys), on the model of the Colophon
 //! Atelier's (pdfcraft, EVORA-COL-12).
 //!
@@ -10,9 +10,11 @@
 //! otherwise the referrer may only pick among the admitted origins, or the single one.
 //!
 //! Start (§7.1): `evora:ready` as soon as the bridge listens, before any browser storage is
-//! opened; the engine then waits for `evora:init`, which brings the language, the theme and the
-//! host's settings. `evora:ack` once the editor runs, `evora:failed {code}` if it can't start.
-//! (The storage namespace of `evora:init` and the purges are patch E5's.)
+//! touched; the engine then waits for `evora:init`. It brings the storage namespace (`storageNs`,
+//! patch E5: the only way the engine learns it), the language, the theme and the host's settings;
+//! the stores of other namespaces and the un-namespaced ones are deleted (§7.7 b) before the
+//! engine opens its own. `evora:ack` once the editor runs, `evora:failed {code}` if it can't start.
+//! Without an admitted parent, or without a namespace, the engine keeps nothing in browser storage.
 //!
 //! Every message is `{ v: 1, type, id, re?, payload }` (§3). An incoming message is examined only
 //! if `event.source` is the parent window AND `event.origin` the admitted origin (§5.1), then in
@@ -25,10 +27,14 @@
 //! Handled: `evora:init`, `evora:open` (bytes, or a new document), `evora:request-save`,
 //! `evora:saved` (correlated; after a Save As the engine adopts the new `docRef` once its session
 //! edits the copy, not after Save a Copy; without `doc.saved-ack` the engine keeps upstream's saved
-//! state and the host shows its own, §6.3), `evora:lang`, `evora:theme`. Sent:
+//! state and the host shows its own, §6.3), `evora:lang`, `evora:theme`, `evora:purge`. Sent:
 //! `evora:ready`, `evora:ack`, `evora:dirty`, `evora:save` (Save, Save As and the answer to
 //! `evora:request-save`: the working project goes to the host, never to a download, even before
 //! the host opened a document) and `evora:failed`.
+//!
+//! `evora:purge` (§7.7 a) stops every writer first, for good (the store's flushes and session
+//! snapshots, the disk cache, the frame and job workers), then deletes the engine's browser stores
+//! (`js/host.js` `storagePurge`), lists them again, and only then answers.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,13 +45,24 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::persist::{storage_configure, storage_purge};
+
 /// Build slug and protocol version announced in `evora:ready` (§4.4, §10).
 const APP: &str = "kinetika";
 const EHP: &str = "1.0";
 /// What this engine honours (§9.1), each exercised by the CI's « pont-ehp » smoke test. Not yet:
 /// `doc.saved-ack`, `export.drive` (renders still download), `pick.drive`, `media.need`,
 /// `media.ranges`, `command`, `font.inject`, `author`, `doc.multi`.
-const CAPABILITIES: [&str; 6] = ["doc.open", "doc.save", "doc.dirty", "doc.request-save", "live.lang", "live.theme"];
+const CAPABILITIES: [&str; 8] = [
+    "doc.open",
+    "doc.save",
+    "doc.dirty",
+    "doc.request-save",
+    "storage.ns",
+    "storage.purge",
+    "live.lang",
+    "live.theme",
+];
 /// Declared too when the host framed the engine in upstream's memory mode (`?storage=memory`):
 /// nothing persists in browser storage.
 const MEMORY_CAPABILITY: &str = "storage.memory";
@@ -107,6 +124,10 @@ const DEFAULT_NAME: &str = "Untitled Project.ecproj";
 /// What `evora:init` sets before the engine opens browser storage.
 #[derive(Clone, Debug)]
 pub struct Boot {
+    /// The storage namespace (`storage.ns` effective); without one the engine keeps nothing.
+    pub storage_ns: Option<String>,
+    /// Delete the other namespaces' stores and the un-namespaced ones first (`storage.purge`).
+    pub purge: bool,
     /// The engine's catalog code (`None`: English; the host shows its banner).
     pub lang: Option<&'static str>,
     pub dark: bool,
@@ -151,6 +172,7 @@ struct State {
     /// Why the last document write was refused (an `evora:ack` code).
     refusal: Option<&'static str>,
     last_dirty: Option<bool>,
+    purging: bool,
     seen: Vec<String>,
 }
 
@@ -173,7 +195,7 @@ fn bridge() -> Option<Rc<RefCell<State>>> {
 /// `memory`: the host framed the engine in the memory mode (`?storage=memory`).
 pub async fn boot(memory: bool) -> Option<Boot> {
     let Some((window, parent, origin)) = admitted_parent().await else {
-        log::info!("Evora host bridge: no admitted parent page (evora-host.json); the bridge stays mute");
+        log::info!("Evora host bridge: no admitted parent page (evora-host.json); the engine keeps nothing in browser storage");
         return None;
     };
     let mut declared = CAPABILITIES.to_vec();
@@ -196,6 +218,7 @@ pub async fn boot(memory: bool) -> Option<Boot> {
         reply_to: None,
         refusal: None,
         last_dirty: None,
+        purging: false,
         seen: Vec::new(),
     }));
     let listener = state.clone();
@@ -226,6 +249,26 @@ pub async fn boot(memory: bool) -> Option<Boot> {
     let _ = JsFuture::from(init).await;
     let boot = state.borrow().boot.clone();
     boot
+}
+
+/// E5: name the engine's browser stores after the namespace of `evora:init` (or keep nothing:
+/// `persistent` false, the memory mode, or no namespace), then, with `purge`, delete the stores of
+/// the other namespaces and the un-namespaced ones (§7.7 b), before anything is opened.
+pub async fn prepare_storage(ns: String, persistent: bool, purge: bool) {
+    let off = !persistent || ns.is_empty();
+    storage_configure(&ns, off);
+    if !purge {
+        return;
+    }
+    match JsFuture::from(storage_purge("others", false)).await {
+        Ok(r) => {
+            let left = remaining(&r);
+            if left > 0 {
+                log::warn!("Evora host bridge: {left} store(s) of other accounts couldn't be deleted (held by another tab?)");
+            }
+        }
+        Err(e) => log::warn!("Evora host bridge: deleting the other accounts' stores failed: {e:?}"),
+    }
 }
 
 /// What `evora:init` imposes on the session before the first frame (not saved).
@@ -410,6 +453,7 @@ fn receive(state: &Rc<RefCell<State>>, event: &web_sys::MessageEvent) {
         "evora:request-save" => (Some("doc.request-save"), false),
         "evora:lang" => (Some("live.lang"), false),
         "evora:theme" => (Some("live.theme"), false),
+        "evora:purge" => (Some("storage.purge"), false),
         // Unknown here, or a capability this engine doesn't declare: ignored (§4.1, §10).
         _ => return,
     };
@@ -456,6 +500,7 @@ fn receive(state: &Rc<RefCell<State>>, event: &web_sys::MessageEvent) {
         "evora:request-save" => on_request_save(&id, &payload),
         "evora:lang" => on_lang(&id, &payload),
         "evora:theme" => on_theme(&id, &payload),
+        "evora:purge" => on_purge(state, &id, &payload),
         _ => {}
     }
 }
@@ -480,8 +525,7 @@ fn on_init(state: &Rc<RefCell<State>>, id: &str, re: Option<&str>, p: &JsValue) 
     };
     let accent_ok = get(p, "accent").as_string().is_some_and(|a| is_accent(&a));
     let read_only_ok = get(p, "readOnly").as_bool().is_some();
-    // `storageNs` is checked here; the engine uses it with patch E5.
-    let ns_ok = get(p, "storageNs").as_string().is_some_and(|ns| is_storage_ns(&ns));
+    let ns = get(p, "storageNs").as_string().filter(|ns| is_storage_ns(ns));
     let display_name = get(p, "displayName");
     let display_name_ok = display_name.is_undefined() || display_name.as_string().is_some_and(|a| (1..=DISPLAY_NAME_MAX).contains(&a.chars().count()));
     let caps = string_list(&get(p, "capabilities"));
@@ -498,10 +542,10 @@ fn on_init(state: &Rc<RefCell<State>>, id: &str, re: Option<&str>, p: &JsValue) 
     let limits_ok = plain_object(&limits)
         && only_keys(&limits, &["maxDocumentBytes", "maxExportBytes"])
         && [max_document, max_export].iter().all(|m| m.is_some_and(|m| m >= 1.0 && m.fract() == 0.0));
-    let (Some(engine_lang), Some(caps), Some(max_document)) = (engine_lang, caps, max_document) else {
+    let (Some(engine_lang), Some(ns), Some(caps), Some(max_document)) = (engine_lang, ns, caps, max_document) else {
         return;
     };
-    if !(lang_ok && accent_ok && read_only_ok && ns_ok && display_name_ok && caps_ok && prefs_ok && limits_ok) {
+    if !(lang_ok && accent_ok && read_only_ok && display_name_ok && caps_ok && prefs_ok && limits_ok) {
         return;
     }
     // The effective set: what the host offers and this engine declares (§9).
@@ -509,9 +553,11 @@ fn on_init(state: &Rc<RefCell<State>>, id: &str, re: Option<&str>, p: &JsValue) 
     st.caps = caps.into_iter().filter(|c| declared.contains(&c.as_str())).collect();
     st.max_document = max_document;
     st.init_id = Some(id.to_string());
+    let storage_ns = st.has("storage.ns").then_some(ns);
+    let purge = st.has("storage.purge");
     let lang = engine_lang.as_deref().and_then(crate::evora_language);
     let disk_cache = get(&prefs, PREF_DISK_CACHE).as_bool();
-    st.boot = Some(Boot { lang, dark, disk_cache });
+    st.boot = Some(Boot { storage_ns, purge, lang, dark, disk_cache });
     if let Some(resolve) = st.init_waiter.take() {
         let _ = resolve.call0(&JsValue::NULL);
     }
@@ -727,6 +773,58 @@ fn on_theme(id: &str, p: &JsValue) {
         app.session.prefs_changed();
         answer(&id, true, None);
     });
+}
+
+fn on_purge(state: &Rc<RefCell<State>>, id: &str, p: &JsValue) {
+    let all = match get(p, "scope").as_string().as_deref() {
+        Some("all") => true,
+        Some("current") => false,
+        _ => return,
+    };
+    if !only_keys(p, &["scope"]) {
+        return;
+    }
+    {
+        let mut st = state.borrow_mut();
+        if st.purging {
+            ack(&st, id, false, Some("busy"));
+            return;
+        }
+        st.purging = true;
+    }
+    // §7.7: every writer stops first, for good: the store's flushes and session snapshots, the
+    // disk cache, the frame workers (they write the cache); `storagePurge` ends the job workers,
+    // closes the page's databases and waits for the operations under way.
+    crate::persist::freeze();
+    crate::diskcache::freeze();
+    crate::frames::stop_workers();
+    let id = id.to_string();
+    let state = state.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        let result = JsFuture::from(storage_purge(if all { "all" } else { "current" }, true)).await;
+        let left = match &result {
+            Ok(r) => remaining(r),
+            Err(e) => {
+                log::warn!("Evora host bridge: purging browser storage failed: {e:?}");
+                1
+            }
+        };
+        let mut st = state.borrow_mut();
+        st.purging = false;
+        // The answer only once the stores are gone (listed again by `storagePurge`).
+        if left == 0 {
+            ack(&st, &id, true, None);
+        } else {
+            log::warn!("Evora host bridge: {left} store(s) still present after the purge");
+            ack(&st, &id, false, Some("busy"));
+        }
+    });
+}
+
+/// How many stores a `storagePurge` result says are left (unknown: 1).
+fn remaining(result: &JsValue) -> u32 {
+    let left = get(result, "remaining");
+    if js_sys::Array::is_array(&left) { js_sys::Array::from(&left).length() } else { 1 }
 }
 
 /// `evora:ack` for `re`, from the UI thread.
