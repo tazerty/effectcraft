@@ -31,6 +31,9 @@ self.addEventListener("fetch", (event) => {
   const req = event.request;
   const url = new URL(req.url);
   if (req.method !== "GET" || url.origin !== self.location.origin) return;
+  // Evora (E4): the host bridge's admitted origins, written by Evora's provisioning: always from
+  // the network, never from this cache.
+  if (url.pathname.endsWith("/evora-host.json")) return;
   event.respondWith(
     (async () => {
       const cache = await caches.open(CACHE);

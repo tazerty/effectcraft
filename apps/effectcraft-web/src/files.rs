@@ -118,13 +118,25 @@ impl Services for WebServices {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{path}: open it with File ▸ Open (or drop it on the page)")))
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
-        put(path, data.into());
         let quiet = {
             let mut q = QUIET.lock().unwrap_or_else(|e| e.into_inner());
             let n = q.len();
             q.retain(|p| p != path);
             q.len() != n
         };
+        // Evora (E4): in the host bridge, the project goes to the Evora page (`evora:save`),
+        // never to a download.
+        if !quiet && !crate::is_worker() {
+            match crate::ehp::write(path, data) {
+                crate::ehp::HostWrite::NotHost => {}
+                crate::ehp::HostWrite::Sent => {
+                    put(path, data.into());
+                    return Ok(());
+                }
+                crate::ehp::HostWrite::Refused(why) => return Err(std::io::Error::other(why)),
+            }
+        }
+        put(path, data.into());
         if quiet || crate::is_worker() {
             return Ok(());
         }
