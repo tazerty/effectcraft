@@ -9,7 +9,9 @@ non-zero when a blocking gate fails):
 - `site --dir DIR`: the packaged static site. Hosting files (.htaccess, _headers, *.conf) absent;
   ArtCraft marks (artcraft, discord.gg, getartcraft) absent from the site (LICENSES/ excepted);
   every precompressed .br/.gz file decompresses to its original; CSP hashes of the inline scripts
-  written to DIR/csp-hashes.txt; sizes printed.
+  written to DIR/csp-hashes.txt; sizes printed. The files Evora's provisioning rewrites (E4:
+  evora-host.json, the host bridge's admitted parent origins) ship with their neutral content and
+  are never precompressed (a stale copy would outlive the provisioning).
 - `terms --repo DIR --mode measure|block`: sensitive third-party terms (Lumetri, Lightroom, Acrobat,
   Premiere, Adobe, Cycore) left in the displayed string literals once the display-name override
   catalogue of patch E9 (crates/ui-egui/src/i18n/neutral.rs, read from its source) is applied.
@@ -26,6 +28,7 @@ import fnmatch
 import glob
 import gzip
 import hashlib
+import json
 import os
 import re
 import struct
@@ -37,6 +40,9 @@ BRAND_TERMS = ("artcraft", "discord.gg", "getartcraft")
 HOSTING_NAMES = {".htaccess", "_headers"}
 HOSTING_PATTERNS = ("*.conf",)
 COMPRESSIBLE = {".wasm", ".js", ".mjs", ".html", ".svg", ".webmanifest", ".json", ".css"}
+# Files Evora's provisioning rewrites next to index.html, with the content they must ship with
+# (E4: no admitted parent origin, the host bridge stays mute until Evora provisions the build).
+PROVISIONED = {"evora-host.json": {"parentOrigins": []}}
 EMOJI_FONTS = {"NotoEmoji-Regular", "emoji-icon-font"}
 # CSP Level 3 specification, example of a hash source: `alert('Hello, world.');`.
 CSP_SPEC_SCRIPT = "alert('Hello, world.');"
@@ -125,6 +131,11 @@ def check_precompressed(root):
     for rel in sorted(files):
         if rel.startswith("LICENSES/") or rel.endswith((".br", ".gz")):
             continue
+        if rel in PROVISIONED:
+            for ext in (".br", ".gz"):
+                if rel + ext in files:
+                    problems.append(f"{rel}{ext}: provisioned file precompressed")
+            continue
         if os.path.splitext(rel)[1] not in COMPRESSIBLE:
             continue
         original = open(os.path.join(root, rel), "rb").read()
@@ -144,6 +155,25 @@ def check_precompressed(root):
         if rel.endswith((".br", ".gz")) and rel[:-3] not in files:
             problems.append(f"{rel} has no original")
     return checked, problems
+
+
+def check_provisioned(root):
+    """Problems of the provisioned files: each present, with exactly its neutral JSON content."""
+    problems = []
+    for rel, neutral in sorted(PROVISIONED.items()):
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            problems.append(f"{rel} missing")
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                content = json.load(f)
+        except (OSError, ValueError) as e:
+            problems.append(f"{rel}: {e}")
+            continue
+        if content != neutral:
+            problems.append(f"{rel} is {content}, not {neutral}")
+    return problems
 
 
 def cmd_witness(_args):
@@ -182,11 +212,34 @@ def cmd_witness(_args):
         subprocess.run(["brotli", "-q", "11", "-k", os.path.join(site, "a.js")], check=True)
         with gzip.open(os.path.join(site, "b.html.gz"), "wb") as f:
             f.write(b"tampered")
+        # A provisioned file without copies passes; with one, it is caught.
+        with open(os.path.join(site, "evora-host.json"), "w", encoding="utf-8") as f:
+            f.write('{"parentOrigins": []}\n')
         checked, problems = check_precompressed(site)
         ok = checked == 2 and sorted(problems) == ["b.html.br missing", "b.html.gz does not decompress to b.html"]
-        rows.append(f"- précompression : {checked} vérifiés, {len(problems)} défauts attendus {'OK' if ok else 'ÉCHEC'}")
+        subprocess.run(["gzip", "-9", "-n", "-k", os.path.join(site, "evora-host.json")], check=True)
+        _, problems2 = check_precompressed(site)
+        ok = ok and sorted(problems2) == ["b.html.br missing", "b.html.gz does not decompress to b.html", "evora-host.json.gz: provisioned file precompressed"]
+        rows.append(f"- précompression : {checked} vérifiés, {len(problems)} défauts attendus, fichier provisionné précompressé relevé {'OK' if ok else 'ÉCHEC'}")
         if not ok:
-            fail(f"témoin précompression : {checked} {problems}")
+            fail(f"témoin précompression : {checked} {problems} {problems2}")
+        # Provisioned files: the neutral content passes; an admitted origin, a missing file and
+        # malformed JSON are caught.
+        prov = os.path.join(tmp, "prov")
+        os.makedirs(prov)
+        found = []
+        for body in ('{"parentOrigins": []}\n', '{"parentOrigins": ["https://evora.example"]}\n', None, "{"):
+            path = os.path.join(prov, "evora-host.json")
+            if os.path.exists(path):
+                os.remove(path)
+            if body is not None:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(body)
+            found.append(len(check_provisioned(prov)))
+        ok = found == [0, 1, 1, 1]
+        rows.append(f"- fichiers provisionnés (contenu neutre) : {found} {'OK' if ok else 'ÉCHEC'}")
+        if not ok:
+            fail(f"témoin fichiers provisionnés : {found}")
     rows.append("")
     summary(rows)
     print("\n".join(rows))
@@ -221,6 +274,11 @@ def cmd_site(args):
     rows.append(f"| « artcraft » dans LICENSES/ (mentions conservées) | {lic} | conservées | non |")
     if any(totals.values()):
         fail(f"marques ArtCraft dans le site : {totals} ({'; '.join(per_file)})")
+    # Provisioned files (E4): shipped neutral, the host bridge mute until Evora provisions it.
+    provisioned = check_provisioned(root)
+    rows.append(f"| Fichiers provisionnés par Evora au contenu neutre ({', '.join(sorted(PROVISIONED))}) | défauts {len(provisioned)} | 0 | oui |")
+    for p in provisioned:
+        fail(f"fichier provisionné : {p}")
     # Precompressed files.
     checked, problems = check_precompressed(root)
     rows.append(f"| Fichiers .br/.gz vérifiés (décompressés = originaux) | {checked}, défauts {len(problems)} | tous | oui |")

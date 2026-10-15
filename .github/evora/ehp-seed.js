@@ -1,0 +1,48 @@
+"use strict";
+// Banc « pont-ehp » (écrit par Evora ; patch E5) : page d'amorçage servie par le banc sur l'origine
+// du moteur, à la place du moteur, dans son cadre (jamais dans l'artefact). Elle sème ce qu'un
+// navigateur partagé peut contenir avant le démarrage : les magasins du moteur sans espace de noms
+// (amont), ceux d'un autre compte, ceux d'une ancienne build (« ci-a »), ceux du compte lui-même
+// (`own`, gardés par evora:init, effacés par evora:purge), et des témoins étrangers au moteur
+// (« evora-keep ») qui doivent survivre à toute purge. Elle dit ce qu'elle voit à la page parente,
+// puis ouvre le moteur dans le même cadre.
+(async () => {
+  const q = new URLSearchParams(location.search);
+  const PARENT = q.get("parent");
+  const OWN = q.get("own") || "";
+  const OTHER = "c".repeat(64);
+  const report = (m) => parent.postMessage({ harness: "seed", ...m }, PARENT);
+  const list = async () => {
+    const out = { opfs: [], idb: [], ls: [] };
+    const root = await navigator.storage.getDirectory();
+    for await (const [name] of root.entries()) out.opfs.push(name);
+    out.idb = (await indexedDB.databases()).map((d) => d.name);
+    for (let i = 0; i < localStorage.length; i++) out.ls.push(localStorage.key(i));
+    return out;
+  };
+  try {
+    const root = await navigator.storage.getDirectory();
+    const folders = ["effectcraft", "effectcraft-cache", `evns-${OTHER}--effectcraft`, `evns-${OTHER}--effectcraft-cache`, "evns-ci-a--effectcraft", "evora-keep"];
+    if (OWN) folders.push(`evns-${OWN}--effectcraft-cache`);
+    for (const name of folders) {
+      const dir = await root.getDirectoryHandle(name, { create: true });
+      const file = await dir.getFileHandle("seed", { create: true });
+      const w = await file.createWritable();
+      await w.write("seed");
+      await w.close();
+    }
+    for (const name of ["effectcraft-handles", `evns-${OTHER}--effectcraft-handles`, "evora-keep"]) {
+      await new Promise((res, rej) => {
+        const r = indexedDB.open(name, 1);
+        r.onupgradeneeded = () => r.result.createObjectStore("seed");
+        r.onsuccess = () => { r.result.close(); res(); };
+        r.onerror = () => rej(r.error);
+      });
+    }
+    for (const key of [`evns-${OTHER}--effectcraft`, "effectcraft-seed", "evora-keep"]) localStorage.setItem(key, "seed");
+    report({ listing: await list() });
+  } catch (e) {
+    report({ error: String((e && e.message) || e) });
+  }
+  location.replace(`index.html?${q.get("q") || ""}`);
+})();
