@@ -17,6 +17,7 @@
 //! | Render Queue / analysis threads | Web Workers running their own engine instance ([`worker`]) |
 //! | cpal audio output | Web Audio: an AudioWorklet fed from the preview mixdown ([`audio`]) |
 //! | TCP control channel / MCP | `window.effectcraft` JavaScript API ([`api`]) |
+//! | (none) | Evora: the host protocol bridge to the Evora editor page, `?host=evora` (`ehp`) |
 //!
 //! [`store`] is portable (unit-tested natively); everything else is `wasm32`-only.
 
@@ -34,6 +35,9 @@ pub mod audio;
 pub mod browse;
 #[cfg(target_arch = "wasm32")]
 pub mod diskcache;
+/// Evora (E4): the Evora host protocol bridge (`?host=evora`); its browser storage side is E5.
+#[cfg(target_arch = "wasm32")]
+mod ehp;
 #[cfg(target_arch = "wasm32")]
 pub mod files;
 #[cfg(target_arch = "wasm32")]
