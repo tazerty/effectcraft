@@ -12,6 +12,14 @@ workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Evora (CI only, never in the artefact): the witness build of the « pont-ehp » bench
+# (.github/workflows/evora-web.yml). It breaks, on purpose, what the bench must catch: answers
+# that wait for a UI frame, the source check of incoming messages, evora:dirty after a save, and
+# evora:purge (no writer stopped, answered before the stores are gone). The release build
+# (`cargo xtask web`) never enables it.
+evora-witness = []
+
 # The browser glue is wasm32-only; on other targets the crate holds just the portable storage
 # model (`store`), unit-tested natively. Build the app with `cargo xtask web` (see docs/web.md).
 [dependencies]

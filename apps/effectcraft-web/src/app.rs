@@ -66,7 +66,8 @@ pub(crate) fn egui_ctx() -> Option<egui::Context> {
 
 /// Evora (E4): in the host bridge, schedule a [`pump`] (one at a time).
 fn schedule_pump() {
-    if !crate::ehp::hosted() || PUMP.with(Cell::get) {
+    // The bench's witness build (feature `evora-witness`, never in the artefact) waits for frames.
+    if cfg!(feature = "evora-witness") || !crate::ehp::hosted() || PUMP.with(Cell::get) {
         return;
     }
     let Some(window) = web_sys::window() else { return };

@@ -40,7 +40,10 @@ const PROJECT = JSON.stringify({
   items: {},
   next_id: 1,
 });
-const S = (window.__ehp = { log: [], ids: {}, harness: [], saves: [], acks: {}, version: 1 });
+// `seq` numbers every message the page receives, in the order it receives them: two messages the
+// engine posts in the same task often arrive in the same millisecond, so the order of evora:save
+// and evora:dirty is judged by `seq`, never by `at`.
+const S = (window.__ehp = { log: [], ids: {}, harness: [], saves: [], acks: {}, version: 1, seq: 0 });
 const engine = document.getElementById("engine");
 const rogueSource = document.getElementById("rogue-source");
 const rogueOrigin = document.getElementById("rogue-origin");
@@ -61,17 +64,20 @@ const describe = (v) =>
 addEventListener("message", (e) => {
   const d = e.data;
   const at = now();
+  S.seq += 1;
+  const seq = S.seq;
   const fromEngineFrame = e.source === engine.contentWindow;
   const fromRogue = e.source === rogueSource.contentWindow || e.source === rogueOrigin.contentWindow;
   // The bench's own reports (the seed page before the engine starts, the rogue frames): not EHP.
   if (d && typeof d === "object" && typeof d.harness === "string" && ((fromEngineFrame && d.harness === "seed" && !S.ids.ready) || fromRogue)) {
-    S.harness.push({ at, origin: e.origin, report: describe(d) });
+    S.harness.push({ at, seq, origin: e.origin, report: describe(d) });
     return;
   }
   const fromEngine = fromEngineFrame && e.origin === ENGINE;
   const plain = d !== null && typeof d === "object" && Object.getPrototypeOf(d) === Object.prototype;
   S.log.push({
     at,
+    seq,
     origin: e.origin,
     fromEngine,
     plain,
@@ -96,22 +102,17 @@ addEventListener("message", (e) => {
       id: S.ids.init,
       re: d.id,
       payload: {
-        lang: "fr", engineLang: "fr", theme: "dark", accent: "#4F46E5", readOnly: false, storageNs: NS,
+        // Light at start: the engine's default is dark, so a theme left unapplied can't pass.
+        lang: "fr", engineLang: "fr", theme: "light", accent: "#4F46E5", readOnly: false, storageNs: NS,
         capabilities: Array.isArray(p.capabilities) ? p.capabilities : [], prefs: PREFS,
         limits: { maxDocumentBytes: MAX_BYTES, maxExportBytes: MAX_BYTES },
       },
     });
   } else if (d.type === "evora:ack") {
-    S.acks[d.re] = { at, payload: describe(p) };
-    if (d.re === S.ids.init && p.ok === true && !S.ids.open) {
-      S.ids.doc = ulid();
-      S.ids.open = ulid();
-      const bytes = new TextEncoder().encode(PROJECT).buffer;
-      send({ v: 1, type: "evora:open", id: S.ids.open, payload: { docRef: S.ids.doc, name: "evora-smoke.ecproj", bytes } }, [bytes]);
-    }
+    S.acks[d.re] = { at, seq, payload: describe(p) };
   } else if (d.type === "evora:save") {
     const entry = {
-      at, id: d.id, re: d.re !== undefined ? d.re : null, docRef: p.docRef, name: p.name, saveAs: p.saveAs,
+      at, seq, id: d.id, re: d.re !== undefined ? d.re : null, docRef: p.docRef, name: p.name, saveAs: p.saveAs,
       arrayBuffer: p.bytes instanceof ArrayBuffer, byteLength: p.bytes instanceof ArrayBuffer ? p.bytes.byteLength : -1, items: null,
     };
     try {
@@ -138,6 +139,16 @@ const request = (key, type, payload) => {
   return S.ids[key];
 };
 S.step = {
+  // evora:open of a small project in bytes, once evora:init is accepted (smoke.mjs first waits for
+  // the engine's first frames: see EHP_SETTLE_MS).
+  open() {
+    if (!S.acks[S.ids.init] || S.acks[S.ids.init].payload.ok !== true || S.ids.open) return false;
+    S.ids.doc = ulid();
+    S.ids.open = ulid();
+    const bytes = new TextEncoder().encode(PROJECT).buffer;
+    send({ v: 1, type: "evora:open", id: S.ids.open, payload: { docRef: S.ids.doc, name: "evora-smoke.ecproj", bytes } }, [bytes]);
+    return true;
+  },
   // The same evora:request-save from two windows that aren't the engine's parent (one on this
   // origin, one on an origin evora-host.json doesn't admit) and in version 2: none may be answered.
   rogue() {
@@ -152,11 +163,21 @@ S.step = {
   // The witness: the same request from the parent, answered (nothing to save yet: "clean").
   clean: () => request("clean", "evora:request-save", { reason: "user", docRef: S.ids.doc }),
   save: () => request("save", "evora:request-save", { reason: "autosave", docRef: S.ids.doc }),
+  // The engine's frame shown or not painted (display: none): the browser gives an iframe it
+  // doesn't paint no animation frame, even in a visible tab.
+  hide(on) {
+    engine.style.display = on ? "none" : "";
+    return engine.style.display;
+  },
+  // What the Evora page asks when the editor's frame goes out of sight (§7.2): the document open
+  // now (the copy after « Enregistrer sous »).
+  hiddenSave: () => request("hidden", "evora:request-save", { reason: "visibility", docRef: S.ids.copy || S.ids.doc }),
   live() {
-    request("theme", "evora:theme", { theme: "light", accent: "#4F46E5" });
+    request("theme", "evora:theme", { theme: "dark", accent: "#4F46E5" });
     request("lang", "evora:lang", { lang: "de", engineLang: "de" });
     return true;
   },
+  live2: () => request("theme2", "evora:theme", { theme: "light", accent: "#4F46E5" }),
   purge: () => request("purge", "evora:purge", { scope: "current" }),
 };
 
