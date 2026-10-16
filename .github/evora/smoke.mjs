@@ -267,14 +267,16 @@ const EHP_READY_WAIT_MS = 20000;
 const EHP_ROGUE_SETTLE_MS = 1500;
 const EHP_ADOPT_MS = 800;
 const EHP_REWRITE_WAIT_MS = 2500;
-// The engine's first frames (EVORA-KIN-20): on the runner's software GPU (SwiftShader) the first
-// one compiles the GPU compositor's shaders on the page's thread, about 50 s in run 38879898863
-// (evora:init answered at 1792143484913, evora:open at 1792143535123), and the page's graphics
-// device is lost afterwards. The bench waits for that (three requests answered one after the
-// other, each by a later pass than the one before) before it opens the document, so that every
-// answer of the protocol is then judged within EHP_WAIT_MS.
-const EHP_SETTLE_MS = 180000;
-const EHP_SETTLE_PASSES = 3;
+// The engine's start (EVORA-KIN-20, KIN-22): on the runner's software GPU (SwiftShader) the
+// page's graphics device is lost soon after the start and the page's thread is held for tens of
+// seconds at a time that varies (about 50 s between the answers to evora:init and evora:open in
+// run 38879898863; in run 38886463958 the hold began right after three prompt answers). The bench
+// waits until the engine answers promptly EHP_SETTLE_STEADY times in a row, a second apart,
+// before it opens the document, so that every answer of the protocol is then judged within
+// EHP_WAIT_MS.
+const EHP_SETTLE_MS = 240000;
+const EHP_SETTLE_STEADY = 10;
+const EHP_PROBE_MS = 3000;
 // The engine's frame not painted (display: none): the time its animation frames take to stop, and
 // how long evora:request-save may wait for its evora:save meanwhile.
 const EHP_HIDE_SETTLE_MS = 1500;
@@ -393,14 +395,25 @@ async function runEhp(ectx, parentOrigin) {
   if (!s) return;
   const settleFrom = Date.now();
   const settleEnd = settleFrom + EHP_SETTLE_MS;
-  let passes = 0;
-  while (passes < EHP_SETTLE_PASSES && Date.now() < settleEnd) {
-    const answered = await Promise.race([request("ui.inspect").then(() => true, () => false), sleep(Math.max(0, settleEnd - Date.now())).then(() => false)]);
-    if (answered) passes += 1;
-    else await sleep(500);
+  let steady = 0;
+  let probes = 0;
+  let held = 0;
+  while (steady < EHP_SETTLE_STEADY && Date.now() < settleEnd) {
+    probes += 1;
+    const t0 = Date.now();
+    const answered = await Promise.race([request("ui.inspect").then(() => true, () => false), sleep(EHP_PROBE_MS).then(() => false)]);
+    if (answered && Date.now() - t0 < EHP_PROBE_MS) {
+      steady += 1;
+      await sleep(1000);
+    } else {
+      steady = 0;
+      held += 1;
+      await sleep(500);
+    }
   }
-  const settled = passes >= EHP_SETTLE_PASSES;
+  const settled = steady >= EHP_SETTLE_STEADY;
   r.timing.settle = Date.now() - settleFrom;
+  console.log(`SMOKE_DIAG ${label} settle ${JSON.stringify({ ms: r.timing.settle, probes, held, settled })}`);
   check(settled, `[ehp] le moteur ne répond pas après evora:init : rien en ${EHP_SETTLE_MS} ms`);
   if (!settled) return;
   await diag(ectx, "settled");
@@ -582,6 +595,9 @@ async function runEhp(ectx, parentOrigin) {
     // may not even try to write (a store already listed after the answer is « non vide » above).
     await exec("comp.new", {});
     await sleep(EHP_REWRITE_WAIT_MS);
+    // Passes of the engine after that wait (a session snapshot is due at most a second after a
+    // change): three requests, each answered by a later pass than the one before.
+    for (let i = 0; i < 3; i++) await request("ui.inspect").catch(() => null);
     const later = await listing();
     r.purge.later = later;
     const leftAfter = new Set(engineStores(afterPurge).map(([k, n]) => `${k}:${n}`));
