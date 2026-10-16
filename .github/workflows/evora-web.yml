@@ -287,9 +287,36 @@ jobs:
       - name: Gate on sensitive terms after the display-name overrides (E9)
         run: python3 .github/evora/gates.py terms --repo . --mode "$EVORA_TERMS_GATE"
 
+      # Témoin moteur du banc « pont-ehp » (EVORA-KIN-20) : la même crate web construite avec la
+      # fonctionnalité evora-witness, qui casse exprès ce que le banc doit attraper (réponses qui
+      # attendent une image, contrôle de la source, evora:dirty après l'enregistrement, purge sans
+      # arrêt des écritures et accusée avant l'effacement). Servie par le banc seulement, sur une copie
+      # du site : jamais dans l'artefact, qui est déjà empaqueté et passé par ses portes.
+      - name: Build the bench's witness engine (feature evora-witness, never published)
+        id: witness
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+        run: |
+          set -euo pipefail
+          cargo build --locked --target wasm32-unknown-unknown -p effectcraft-web --profile release --features evora-witness
+          git diff --exit-code -- Cargo.lock || { echo "::error::le build du témoin a modifié Cargo.lock"; exit 1; }
+          wout="$RUNNER_TEMP/evora-witness-wasm"
+          site="$RUNNER_TEMP/evora-witness-site"
+          mkdir -p "$wout" "$site"
+          wasm-bindgen --target web --no-typescript --out-dir "$wout" target/wasm32-unknown-unknown/release/effectcraft_web.wasm
+          # Le site de l'artefact sans son moteur (wasm, colle JS, snippets), puis le moteur témoin.
+          (cd "$DIR" && tar --exclude='./snippets' --exclude='./effectcraft_web*' -cf - .) | (cd "$site" && tar -xf -)
+          cp -R "$wout/." "$site/"
+          [ -f "$site/effectcraft_web_bg.wasm" ] && [ -f "$site/effectcraft_web.js" ] || { echo "::error::moteur témoin incomplet"; exit 1; }
+          cmp -s "$DIR/effectcraft_web_bg.wasm" "$site/effectcraft_web_bg.wasm" && { echo "::error::le moteur témoin est celui de l'artefact"; exit 1; }
+          [ "$(cd "$site" && ls snippets/*/js/host.js | wc -l)" = 1 ] || { echo "::error::js/host.js du témoin introuvable ou multiple"; exit 1; }
+          echo "Moteur témoin : $(stat -c %s "$site/effectcraft_web_bg.wasm") octets (artefact : $(stat -c %s "$DIR/effectcraft_web_bg.wasm"))"
+          echo "site=$site" >> "$GITHUB_OUTPUT"
+
       - name: Smoke test (headless Chrome, engine framed by another origin)
         env:
           DIR: ${{ steps.pkg.outputs.dir }}
+          WITNESS: ${{ steps.witness.outputs.site }}
         run: |
           set -euo pipefail
           smoke="$RUNNER_TEMP/evora-smoke"
@@ -302,6 +329,8 @@ jobs:
           # Témoin de purge sabotée (E5) : moteur servi avec un js/host.js dont la purge
           # d'evora:purge répond aussitôt, sans rien arrêter ni effacer (PZ).
           PZ=8608
+          # Témoin moteur (EVORA-KIN-20) : le moteur construit avec evora-witness (PW).
+          PW=8609
           hashes="$(grep -o "^'sha256-[^']*'" "$DIR/csp-hashes.txt" | tr '\n' ' ')"
           [ -n "$hashes" ] || { echo "::error::csp-hashes.txt vide"; exit 1; }
           # La CSP prévue pour les documents du moteur (apps/kinetika/CLAUDE.md §6.5), le parent
@@ -351,7 +380,9 @@ jobs:
           python3 .github/evora/serve.py --root "$smoke/parent" --port "$PR" > "$smoke/serve-intrus.log" 2>&1 &
           python3 .github/evora/serve.py --root "$DIR" --port "$PZ" --header "Content-Security-Policy: $csp" \
             --map "/evora-host.json=$smoke/host-admit.json" --map "/$hostjs=$smoke/host-purge-sabotage.js" $seedmap > "$smoke/serve-purge-sabotage.log" 2>&1 &
-          for p in "$PB" "$PA" "$PC" "$PS" "$PE" "$PT" "$PR" "$PZ"; do
+          python3 .github/evora/serve.py --root "$WITNESS" --port "$PW" --header "Content-Security-Policy: $csp" \
+            --map "/evora-host.json=$smoke/host-admit.json" $seedmap > "$smoke/serve-temoin-moteur.log" 2>&1 &
+          for p in "$PB" "$PA" "$PC" "$PS" "$PE" "$PT" "$PR" "$PZ" "$PW"; do
             for _ in $(seq 1 50); do
               code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$p/" || true)"
               [ "$code" != "000" ] && break
@@ -378,36 +409,40 @@ jobs:
             --parent="$(ehp_parent "http://127.0.0.1:$PE" "host=evora&storage=memory&nosw&storageNs=$urlns" '{"disk.diskCacheEnabled": false}')" || rc=1
           node $NODE_WS .github/evora/smoke.mjs --engine="http://127.0.0.1:$PE" --label=pont-ehp-opfs --out="$smoke" --ehp=opfs --ehp-ns="$ns" --ehp-url-ns="$urlns" \
             --parent="$(ehp_parent "http://127.0.0.1:$PE" "host=evora&nosw&storageNs=$urlns" '{}')" || rc=1
-          # Témoin muet : evora-host.json n'admet pas le parent ; le banc doit rougir (aucun
-          # evora:ready, magasins étrangers non purgés), pas le moteur démarrer sans pont.
-          if node $NODE_WS .github/evora/smoke.mjs --engine="http://127.0.0.1:$PT" --label=pont-ehp-temoin --out="$smoke" --ehp=memory --ehp-ns="$ns" --ehp-url-ns="$urlns" \
-            --parent="$(ehp_parent "http://127.0.0.1:$PT" "host=evora&storage=memory&nosw" '{"disk.diskCacheEnabled": false}')" > "$smoke/ehp-temoin.out" 2>&1; then
-            cat "$smoke/ehp-temoin.out"
-            echo "::error::témoin muet : le banc pont-ehp passe sans pont admis"
-            rc=1
-          elif ! grep -q 'SMOKE_FAIL \[ehp\] evora:ready : rien' "$smoke/ehp-temoin.out" || ! grep -q 'SMOKE_FAIL \[ehp\] magasins étrangers non purgés' "$smoke/ehp-temoin.out" || ! grep -q '^SMOKE .*ok=false' "$smoke/ehp-temoin.out"; then
-            cat "$smoke/ehp-temoin.out"
-            echo "::error::témoin muet : échec sans les deux constats attendus (evora:ready absent, magasins non purgés)"
-            rc=1
-          else
-            echo "Témoin muet OK : $(grep '^SMOKE ' "$smoke/ehp-temoin.out")"
-            grep '^SMOKE_FAIL \[ehp\]' "$smoke/ehp-temoin.out" || true
-          fi
-          # Témoin de purge sabotée : l'accusé part avant tout effacement ; le banc doit rougir sur
-          # les deux constats de la purge (stockage du moteur non vide, aucune suppression observée).
-          if node $NODE_WS .github/evora/smoke.mjs --engine="http://127.0.0.1:$PZ" --label=pont-ehp-purge-sabotee --out="$smoke" --ehp=memory --ehp-ns="$ns" --ehp-url-ns="$urlns" \
-            --parent="$(ehp_parent "http://127.0.0.1:$PZ" "host=evora&storage=memory&nosw" '{"disk.diskCacheEnabled": false}')" > "$smoke/ehp-purge-sabotee.out" 2>&1; then
-            cat "$smoke/ehp-purge-sabotee.out"
-            echo "::error::témoin de purge sabotée : le banc pont-ehp passe avec une purge qui n'efface rien"
-            rc=1
-          elif ! grep -q 'SMOKE_FAIL \[ehp\] stockage du moteur non vide après evora:purge' "$smoke/ehp-purge-sabotee.out" || ! grep -q 'SMOKE_FAIL \[ehp\] aucune suppression observée pendant la purge' "$smoke/ehp-purge-sabotee.out" || ! grep -q '^SMOKE .*ok=false' "$smoke/ehp-purge-sabotee.out"; then
-            cat "$smoke/ehp-purge-sabotee.out"
-            echo "::error::témoin de purge sabotée : échec sans les deux constats attendus (stockage non vide, aucune suppression)"
-            rc=1
-          else
-            echo "Témoin de purge sabotée OK : $(grep '^SMOKE ' "$smoke/ehp-purge-sabotee.out")"
-            grep '^SMOKE_FAIL \[ehp\]' "$smoke/ehp-purge-sabotee.out" || true
-          fi
+          # Témoins du banc « pont-ehp » (EVORA-KIN-20) : chacun doit rougir exactement sur les constats
+          # de son sabordage (--witness-require), et sur rien d'autre que leurs conséquences déclarées
+          # (--witness-tolerate) ; smoke.mjs le juge (SMOKE_WITNESS ok=true) et sa ligne SMOKE reste ok=false.
+          witness() {
+            local name="$1" out="$2"
+            shift 2
+            if node $NODE_WS .github/evora/smoke.mjs "$@" > "$out" 2>&1 && grep -q '^SMOKE .*ok=false' "$out" && grep -q '^SMOKE_WITNESS .*ok=true' "$out"; then
+              echo "Témoin $name OK : $(grep '^SMOKE_WITNESS ' "$out")"
+              grep '^SMOKE_FAIL ' "$out" || true
+            else
+              cat "$out"
+              echo "::error::témoin $name : le banc ne rougit pas exactement sur les constats de son sabordage"
+              rc=1
+            fi
+          }
+          # Témoin muet : evora-host.json n'admet pas le parent ; aucun evora:ready, magasins étrangers
+          # non purgés, et rien d'autre.
+          witness muet "$smoke/ehp-temoin.out" --engine="http://127.0.0.1:$PT" --label=pont-ehp-temoin --out="$smoke" --ehp=memory --ehp-ns="$ns" --ehp-url-ns="$urlns" \
+            --parent="$(ehp_parent "http://127.0.0.1:$PT" "host=evora&storage=memory&nosw" '{"disk.diskCacheEnabled": false}')" \
+            --witness-require="[ehp] evora:ready : rien|[ehp] magasins étrangers non purgés au démarrage"
+          # Témoin de purge sabotée : copie de js/host.js dont la purge d'evora:purge répond sans rien
+          # arrêter ni effacer ; stockage non vide, aucune suppression, magasins du compte gardés.
+          witness "de purge sabotée" "$smoke/ehp-purge-sabotee.out" --engine="http://127.0.0.1:$PZ" --label=pont-ehp-purge-sabotee --out="$smoke" --ehp=memory --ehp-ns="$ns" --ehp-url-ns="$urlns" \
+            --parent="$(ehp_parent "http://127.0.0.1:$PZ" "host=evora&storage=memory&nosw" '{"disk.diskCacheEnabled": false}')" \
+            --witness-require="[ehp] stockage du moteur non vide après evora:purge|[ehp] aucune suppression observée pendant la purge|[ehp] magasins du compte non supprimés avant l'accusé"
+          # Témoin moteur (evora-witness), avec le stockage du navigateur : réponse à une fenêtre qui
+          # n'est pas le parent, evora:dirty absent après l'enregistrement, aucune réponse tant que le
+          # cadre n'est pas peint, accusé d'evora:purge avant les effacements et écritures après lui.
+          # Tolérés : ce que ces deux derniers sabordages entraînent (stockage encore là ou recréé,
+          # magasins effacés après l'accusé, erreurs de page des écritures refusées).
+          witness moteur "$smoke/ehp-temoin-moteur.out" --engine="http://127.0.0.1:$PW" --label=pont-ehp-temoin-moteur --out="$smoke" --ehp=opfs --ehp-ns="$ns" --ehp-url-ns="$urlns" \
+            --parent="$(ehp_parent "http://127.0.0.1:$PW" "host=evora&nosw" '{}')" \
+            --witness-require="[ehp] réponse à un message refusé (rogueSource)|[ehp] evora:dirty {dirty: false} après l'enregistrement : rien|[ehp] evora:save en réponse à evora:request-save, cadre masqué : rien|[ehp] accusé d'evora:purge envoyé avant la fin des suppressions|[ehp] écriture du moteur après evora:purge" \
+            --witness-tolerate="[ehp] stockage du moteur non vide après evora:purge|[ehp] le moteur a recréé un magasin après evora:purge|[ehp] magasins du compte non supprimés avant l'accusé|erreur(s) de page"
           # Témoin saboté : sous une empreinte CSP fausse le moteur ne doit pas démarrer, et le test le dit.
           if node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-$PS.html" --engine="http://127.0.0.1:$PS" \
             --label=csp-sabotage --out="$smoke" --timeout=30000 --settle=500 > "$smoke/sabotage.out" 2>&1; then

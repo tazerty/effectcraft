@@ -45,6 +45,13 @@ const ehpNs = opt["ehp-ns"] || "";
 const ehpUrlNs = opt["ehp-url-ns"] || "";
 // `--expect-theme=light` (patch E2): the engine was framed with `?theme=light`.
 const expectTheme = opt["expect-theme"] || "";
+// `--witness-require=A|B` and `--witness-tolerate=C|D` (EVORA-KIN-20): a witness pass, against a
+// sabotaged engine, page or bench file. It must fail on each required finding (text found in the
+// failure), and on nothing else but the tolerated ones (consequences of the same sabotage):
+// exactly what its sabotage breaks. Then, and only then, it exits 0 (`SMOKE_WITNESS ... ok=true`);
+// its `SMOKE` line still says ok=false.
+const witnessRequire = (opt["witness-require"] || "").split("|").filter(Boolean);
+const witnessTolerate = (opt["witness-tolerate"] || "").split("|").filter(Boolean);
 const LANGUAGES = ["en", "ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
 const BRAND = /artcraft|discord\.gg|getartcraft/i;
 const EMOJI = /\p{Emoji_Presentation}|\u{FE0F}|\u{20E3}/u;
@@ -233,8 +240,9 @@ const ENGINE_DIAG = `(async () => {
   try { mode = await within(window.effectcraft.execute("prefs.get", { key: "appearance.appearanceMode" })); } catch (e) { mode = "error " + String(e); }
   let gpu = null;
   try { const i = window.effectcraft.info(); gpu = i ? { gpu: i.gpu, backend: i.backend } : null; } catch (e) { gpu = "error " + String(e); }
+  const lost = document.getElementById("device-lost");
   return JSON.parse(JSON.stringify({ at: Date.now(), visibility: document.visibilityState, hasFocus: document.hasFocus(),
-    deviceLost: !!document.getElementById("device-lost"), raf, inspect, mode, gpu }));
+    deviceLost: lost ? (lost.querySelector("small") || lost).textContent.slice(0, 300) : false, raf, inspect, mode, gpu }));
 })()`;
 async function diag(ctx, where) {
   try {
@@ -259,6 +267,18 @@ const EHP_READY_WAIT_MS = 20000;
 const EHP_ROGUE_SETTLE_MS = 1500;
 const EHP_ADOPT_MS = 800;
 const EHP_REWRITE_WAIT_MS = 2500;
+// The engine's first frames (EVORA-KIN-20): on the runner's software GPU (SwiftShader) the first
+// one compiles the GPU compositor's shaders on the page's thread, about 50 s in run 38879898863
+// (evora:init answered at 1792143484913, evora:open at 1792143535123), and the page's graphics
+// device is lost afterwards. The bench waits for that (three requests answered one after the
+// other, each by a later pass than the one before) before it opens the document, so that every
+// answer of the protocol is then judged within EHP_WAIT_MS.
+const EHP_SETTLE_MS = 180000;
+const EHP_SETTLE_PASSES = 3;
+// The engine's frame not painted (display: none): the time its animation frames take to stop, and
+// how long evora:request-save may wait for its evora:save meanwhile.
+const EHP_HIDE_SETTLE_MS = 1500;
+const EHP_HIDDEN_WAIT_MS = 10000;
 const EHP_OTHER_NS = "c".repeat(64);
 const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const ENGINE_STORES = ["effectcraft", "effectcraft-cache", "effectcraft-handles"];
@@ -286,15 +306,32 @@ const LISTING = `(async () => { const out = { opfs: [], idb: [], ls: [] };
   return out; })()`;
 // Every deletion the engine makes from now on, with the wall-clock time it completed (the purge's
 // answer, stamped on the same clock by the parent page, must come after them; performance.now()
-// of two documents isn't comparable).
-const PURGE_HOOKS = `(() => { const log = (window.__evoraPurgeLog = []); const at = () => Date.now();
+// of two documents isn't comparable). And every write the engine's page attempts from now on
+// (opening or creating an OPFS entry for writing, opening an IndexedDB database, setting a
+// localStorage key), with the time it was asked: after the purge's answer there must be none,
+// whether it would succeed or not (a stopped writer doesn't try).
+const PURGE_HOOKS = `(() => { const log = (window.__evoraPurgeLog = []); const writes = (window.__evoraWriteLog = []); const at = () => Date.now();
   const rm = FileSystemDirectoryHandle.prototype.removeEntry;
   FileSystemDirectoryHandle.prototype.removeEntry = function (...a) { return rm.apply(this, a).then((v) => { log.push({ op: "opfs", name: a[0], at: at() }); return v; }); };
   const del = IDBFactory.prototype.deleteDatabase;
   IDBFactory.prototype.deleteDatabase = function (name) { const r = del.call(this, name); r.addEventListener("success", () => log.push({ op: "idb", name, at: at() })); return r; };
   const lr = Storage.prototype.removeItem;
   Storage.prototype.removeItem = function (k) { const v = lr.call(this, k); log.push({ op: "ls", name: k, at: at() }); return v; };
+  for (const m of ["getDirectoryHandle", "getFileHandle"]) {
+    const f = FileSystemDirectoryHandle.prototype[m];
+    FileSystemDirectoryHandle.prototype[m] = function (name, opts) { if (opts && opts.create) writes.push({ op: "opfs:" + m, name, at: at() }); return f.call(this, name, opts); };
+  }
+  const cw = FileSystemFileHandle.prototype.createWritable;
+  FileSystemFileHandle.prototype.createWritable = function (...a) { writes.push({ op: "opfs:createWritable", name: this.name, at: at() }); return cw.apply(this, a); };
+  const op = IDBFactory.prototype.open;
+  IDBFactory.prototype.open = function (...a) { writes.push({ op: "idb:open", name: a[0], at: at() }); return op.apply(this, a); };
+  const si = Storage.prototype.setItem;
+  Storage.prototype.setItem = function (k, v) { writes.push({ op: "ls:setItem", name: k, at: at() }); return si.call(this, k, v); };
   return true; })()`;
+// Animation frames the engine's frame gets in about a second (none when the browser doesn't paint it).
+const RAF_COUNT = `new Promise((res) => { let n = 0; const t0 = performance.now();
+  const tick = () => { n += 1; if (performance.now() - t0 < 1000) requestAnimationFrame(tick); }; requestAnimationFrame(tick);
+  setTimeout(() => res(n), 1200); })`;
 
 async function runEhp(ectx, parentOrigin) {
   const r = (report.ehp = { mode: ehpMode, ns: ehpNs, urlNs: ehpUrlNs, steps: [] });
@@ -325,9 +362,11 @@ async function runEhp(ectx, parentOrigin) {
   const labelsOf = (items) => (items || []).flatMap((it) => [String(it.label ?? ""), ...(it.path || []).map(String)]);
   const seeded = {
     opfs: ["effectcraft", "effectcraft-cache", `evns-${EHP_OTHER_NS}--effectcraft`, `evns-${EHP_OTHER_NS}--effectcraft-cache`, "evns-ci-a--effectcraft", `evns-${ehpNs}--effectcraft-cache`, "evora-keep"],
-    idb: ["effectcraft-handles", `evns-${EHP_OTHER_NS}--effectcraft-handles`, "evora-keep"],
-    ls: [`evns-${EHP_OTHER_NS}--effectcraft`, "effectcraft-seed", "evora-keep"],
+    idb: ["effectcraft-handles", `evns-${EHP_OTHER_NS}--effectcraft-handles`, `evns-${ehpNs}--effectcraft-handles`, "evora-keep"],
+    ls: [`evns-${EHP_OTHER_NS}--effectcraft`, "effectcraft-seed", `evns-${ehpNs}--effectcraft`, "evora-keep"],
   };
+  // The account's own stores the seed page leaves (kept by evora:init, deleted by evora:purge).
+  const seededOwn = [`opfs:evns-${ehpNs}--effectcraft-cache`, `idb:evns-${ehpNs}--effectcraft-handles`, `ls:evns-${ehpNs}--effectcraft`];
   const keepers = (l) => l.opfs.includes("evora-keep") && l.idb.includes("evora-keep") && l.ls.includes("evora-keep");
 
   // 1. The seed page saw its fixture (else a purge check would pass on nothing).
@@ -348,6 +387,22 @@ async function runEhp(ectx, parentOrigin) {
     check(foreign.length === 0, `[ehp] magasins étrangers non purgés au démarrage : ${JSON.stringify(foreign)}`);
     return;
   }
+  s = await until("accusé d'evora:init", (x) => answersTo(x, x.ids.init).length > 0);
+  if (!s) return;
+  const settleFrom = Date.now();
+  const settleEnd = settleFrom + EHP_SETTLE_MS;
+  let passes = 0;
+  while (passes < EHP_SETTLE_PASSES && Date.now() < settleEnd) {
+    const answered = await Promise.race([request("ui.inspect").then(() => true, () => false), sleep(Math.max(0, settleEnd - Date.now())).then(() => false)]);
+    if (answered) passes += 1;
+    else await sleep(500);
+  }
+  const settled = passes >= EHP_SETTLE_PASSES;
+  r.timing.settle = Date.now() - settleFrom;
+  check(settled, `[ehp] le moteur ne répond pas après evora:init : rien en ${EHP_SETTLE_MS} ms`);
+  if (!settled) return;
+  await diag(ectx, "settled");
+  await step("open");
   s = await until("accusé d'evora:open", (x) => answersTo(x, x.ids.open).length > 0);
   if (!s) return;
   const ready = s.log.filter((m) => m.type === "evora:ready");
@@ -372,12 +427,14 @@ async function runEhp(ectx, parentOrigin) {
   const foreign = engineStores(afterInit).filter(([, , ns]) => ns !== ehpNs);
   check(foreign.length === 0, `[ehp] magasins étrangers non purgés au démarrage : ${JSON.stringify(foreign)}`);
   check(keepers(afterInit), `[ehp] témoins étrangers au moteur effacés : ${JSON.stringify(afterInit)}`);
-  check(afterInit.opfs.includes(`evns-${ehpNs}--effectcraft-cache`), "[ehp] magasin du même compte effacé au démarrage (il doit rester)");
   check(!engineStores(afterInit).some(([, , ns]) => ns === ehpUrlNs), `[ehp] espace de noms lu dans l'URL : ${JSON.stringify(afterInit)}`);
   const own = engineStores(afterInit).filter(([, , ns]) => ns === ehpNs).map(([k, n]) => `${k}:${n}`);
+  const lostOwn = seededOwn.filter((x) => !own.includes(x));
+  check(lostOwn.length === 0, `[ehp] magasins du même compte effacés au démarrage (ils doivent rester) : ${JSON.stringify(lostOwn)}`);
   if (ehpMode === "memory") {
     check(r.backend === "memory", `[ehp] stockage du moteur ${r.backend} (attendu : memory)`);
-    check(own.length === 1 && own[0] === `opfs:evns-${ehpNs}--effectcraft-cache`, `[ehp] le moteur a créé un magasin en mode mémoire : ${JSON.stringify(own)}`);
+    const created = own.filter((x) => !seededOwn.includes(x));
+    check(created.length === 0, `[ehp] le moteur a créé un magasin en mode mémoire : ${JSON.stringify(created)}`);
   } else {
     check(r.backend === "opfs", `[ehp] stockage du moteur ${r.backend} (attendu : opfs)`);
     check(own.includes(`opfs:evns-${ehpNs}--effectcraft`), `[ehp] aucun magasin « evns-${ehpNs.slice(0, 8)}…--effectcraft » : ${JSON.stringify(own)}`);
@@ -392,7 +449,7 @@ async function runEhp(ectx, parentOrigin) {
   const theme1 = String(inspect1 && inspect1.ui ? inspect1.ui.theme : "");
   note("theme at init", theme1);
   check(frLabels.includes("Enregistrer"), "[ehp] langue d'evora:init (fr) absente des menus (« Enregistrer »)");
-  check(/^dark/i.test(theme1), `[ehp] thème d'evora:init (sombre) absent : ${theme1}`);
+  check(/^light/i.test(theme1), `[ehp] thème d'evora:init (clair) absent : ${theme1}`);
   await diag(ectx, "init");
 
   // 5. No answer to a window that isn't the parent, to an origin not admitted, to version 2; the
@@ -419,10 +476,11 @@ async function runEhp(ectx, parentOrigin) {
     const v = s.saves.find((x) => x.re === s.ids.save);
     note("save", v);
     check(v.docRef === s.ids.doc && v.name === "evora-smoke.ecproj" && v.saveAs === false && v.arrayBuffer && v.byteLength > 0 && v.items >= 1, `[ehp] evora:save inattendu : ${JSON.stringify(v)}`);
-    const after = await until("evora:dirty {dirty: false} après l'enregistrement", (x) => x.log.some((m) => m.type === "evora:dirty" && m.payload && m.payload.dirty === false && m.at > v.at));
+    // Received after the evora:save (`seq`): both often arrive in the same millisecond.
+    const after = await until("evora:dirty {dirty: false} après l'enregistrement", (x) => x.log.some((m) => m.type === "evora:dirty" && m.payload && m.payload.dirty === false && m.seq > v.seq));
     if (!after) {
-      const tail = (await state()).log.slice(-8).map((m) => ({ type: m.type, at: m.at, re: m.re, dirty: m.payload ? m.payload.dirty : undefined }));
-      console.log(`SMOKE_DIAG ${label} dirty-after-save ${JSON.stringify({ saveAt: v.at, saveId: v.id, tail })}`);
+      const tail = (await state()).log.slice(-8).map((m) => ({ type: m.type, seq: m.seq, at: m.at, re: m.re, dirty: m.payload ? m.payload.dirty : undefined }));
+      console.log(`SMOKE_DIAG ${label} dirty-after-save ${JSON.stringify({ saveSeq: v.seq, saveAt: v.at, saveId: v.id, tail })}`);
     }
   }
   // Save As: a copy (saveAs, the original docRef); the host's new docRef is the document after.
@@ -443,23 +501,64 @@ async function runEhp(ectx, parentOrigin) {
     }
   }
 
-  // 7. Language and theme while running (live.lang, live.theme).
+  // 6b. The engine's frame not painted (display: none): the browser gives it no animation frame,
+  //     even in a visible tab. The Evora page asks for a save when the editor goes out of sight
+  //     (§7.2): the evora:save comes all the same, while the frame stays hidden.
+  s = await state();
+  const current = s.ids.copy || s.ids.doc;
+  await exec("comp.new", {});
+  s = await until("evora:dirty {dirty: true} avant le masquage", (x) => {
+    const last = x.log.filter((m) => m.type === "evora:dirty" && m.payload && m.payload.docRef === current).at(-1);
+    return !!last && last.payload.dirty === true;
+  });
+  if (s) {
+    await evalIn(parentCtx(parentOrigin), "__ehp.step.hide(true)");
+    await sleep(EHP_HIDE_SETTLE_MS);
+    const raf = await evalIn(ectx, RAF_COUNT, true);
+    await step("hiddenSave");
+    s = await until("evora:save en réponse à evora:request-save, cadre masqué", (x) => x.saves.some((v) => v.re === x.ids.hidden), EHP_HIDDEN_WAIT_MS);
+    const display = await evalIn(parentCtx(parentOrigin), "document.getElementById('engine').style.display");
+    r.hidden = { raf, display, answered: !!s };
+    note("hidden", r.hidden);
+    // The premise: the frame got no animation frame while hidden (else this proves nothing).
+    check(raf === 0, `[ehp] prémisse du masquage : le cadre masqué reçoit encore des images d'animation (${raf} en 1 s)`);
+    check(display === "none", `[ehp] prémisse du masquage : le cadre n'est plus masqué à la réponse (${display})`);
+    if (s) {
+      const v = s.saves.find((x) => x.re === s.ids.hidden);
+      check(v.docRef === current && v.saveAs === false && v.byteLength > 0, `[ehp] evora:save du cadre masqué inattendu : ${JSON.stringify(v)}`);
+    }
+    await evalIn(parentCtx(parentOrigin), "__ehp.step.hide(false)");
+    await sleep(EHP_ADOPT_MS);
+  }
+
+  // 7. Language and theme while running (live.lang, live.theme): dark (evora:init made it light),
+  //    then light again; each read as soon as its answer came (the engine answers once it shows it).
   await step("live");
   s = await until("accusés d'evora:theme et d'evora:lang", (x) => answersTo(x, x.ids.theme).length > 0 && answersTo(x, x.ids.lang).length > 0);
   if (s) {
     check(ackOk(s, s.ids.theme) && ackOk(s, s.ids.lang), `[ehp] accusés d'evora:theme / evora:lang : ${JSON.stringify([answersTo(s, s.ids.theme), answersTo(s, s.ids.lang)])}`);
-    await sleep(500);
-    const deLabels = labelsOf(await request("ui.menu.list"));
     const inspect2 = await request("ui.inspect");
     const theme2 = String(inspect2 && inspect2.ui ? inspect2.ui.theme : "");
+    check(/^dark/i.test(theme2), `[ehp] thème à chaud (sombre) absent : ${theme2}`);
+    if (!/^dark/i.test(theme2)) await diag(ectx, "live");
+    await sleep(500);
+    const deLabels = labelsOf(await request("ui.menu.list"));
     const changed = deLabels.filter((l, i) => l !== frLabels[i]).length;
     note("live", { theme: theme2, labelsChanged: changed });
     check(deLabels.includes("Speichern") && changed >= 20, `[ehp] langue à chaud (de) absente : ${changed} libellés changés`);
-    check(/^light/i.test(theme2), `[ehp] thème à chaud (clair) absent : ${theme2}`);
-    if (!/^light/i.test(theme2)) {
-      await diag(ectx, "live");
+  }
+  await step("live2");
+  s = await until("accusé du second evora:theme", (x) => answersTo(x, x.ids.theme2).length > 0);
+  if (s) {
+    check(ackOk(s, s.ids.theme2), `[ehp] accusé du second evora:theme : ${JSON.stringify(answersTo(s, s.ids.theme2))}`);
+    const inspect3 = await request("ui.inspect");
+    const theme3 = String(inspect3 && inspect3.ui ? inspect3.ui.theme : "");
+    note("live2", { theme: theme3 });
+    check(/^light/i.test(theme3), `[ehp] thème à chaud (clair) absent : ${theme3}`);
+    if (!/^light/i.test(theme3)) {
+      await diag(ectx, "live2");
       await sleep(3000);
-      await diag(ectx, "live+3s");
+      await diag(ectx, "live2+3s");
     }
   }
 
@@ -476,18 +575,32 @@ async function runEhp(ectx, parentOrigin) {
     r.purge = { ackAt, afterPurge };
     check(engineStores(afterPurge).length === 0, `[ehp] stockage du moteur non vide après evora:purge : ${JSON.stringify(engineStores(afterPurge))}`);
     check(keepers(afterPurge), `[ehp] témoins étrangers au moteur effacés par la purge : ${JSON.stringify(afterPurge)}`);
-    // An edit after the purge (snapshot, flush, cache): no store may come back.
+    // An edit after the purge (snapshot, flush, cache): no store may come back, and the engine
+    // may not even try to write (a store already listed after the answer is « non vide » above).
     await exec("comp.new", {});
     await sleep(EHP_REWRITE_WAIT_MS);
     const later = await listing();
     r.purge.later = later;
-    check(engineStores(later).length === 0, `[ehp] le moteur a recréé un magasin après evora:purge : ${JSON.stringify(engineStores(later))}`);
-    // Every deletion, read once they are all done: the engine's stores went, before the answer.
+    const leftAfter = new Set(engineStores(afterPurge).map(([k, n]) => `${k}:${n}`));
+    const recreated = engineStores(later).filter(([k, n]) => !leftAfter.has(`${k}:${n}`));
+    check(recreated.length === 0, `[ehp] le moteur a recréé un magasin après evora:purge : ${JSON.stringify(recreated)}`);
+    const writes = await evalIn(ectx, "JSON.parse(JSON.stringify(window.__evoraWriteLog || []))");
+    const late = writes.filter((w) => w.at > ackAt);
+    r.purge.writes = writes;
+    check(late.length === 0, `[ehp] écriture du moteur après evora:purge : ${JSON.stringify(late.slice(0, 10))}`);
+    // Every deletion, read once they are all done: each of the account's stores (OPFS, IndexedDB,
+    // localStorage) went, before the answer.
     const deletions = await evalIn(ectx, "JSON.parse(JSON.stringify(window.__evoraPurgeLog || []))");
     r.purge.deletions = deletions;
     const own = deletions.filter((d) => storeNs(d.name) !== null || keyNs(d.name) !== null);
     check(own.length >= 1, `[ehp] aucune suppression observée pendant la purge : ${JSON.stringify(deletions)}`);
     check(deletions.every((d) => d.at <= ackAt), `[ehp] accusé d'evora:purge envoyé avant la fin des suppressions : ${JSON.stringify({ ackAt, deletions })}`);
+    const doomed = engineStores(beforePurge).filter(([, , ns]) => ns === ehpNs || ns === "").map(([k, n]) => `${k}:${n}`);
+    const goneBeforeAck = new Set(deletions.filter((d) => d.at <= ackAt).map((d) => `${d.op}:${d.name}`));
+    const kept = doomed.filter((x) => !goneBeforeAck.has(x));
+    r.purge.doomed = doomed;
+    check(kept.length === 0, `[ehp] magasins du compte non supprimés avant l'accusé : ${JSON.stringify(kept)}`);
+    check(seededOwn.every((x) => doomed.includes(x)), `[ehp] prémisse de la purge : magasins du compte absents avant evora:purge : ${JSON.stringify(doomed)}`);
   }
 
   // 9. Every message from the engine: its own window and origin, a plain object, EHP v1, the
@@ -657,6 +770,15 @@ try {
   report.warnings = warnings.slice(0, 200);
   report.logs = logs.slice(0, 200);
   report.ok = exitCode === 0;
+  if (witnessRequire.length) {
+    const fails = report.failures;
+    const missing = witnessRequire.filter((w) => !fails.some((f) => f.includes(w)));
+    const unexpected = fails.filter((f) => !witnessRequire.some((w) => f.includes(w)) && !witnessTolerate.some((w) => f.includes(w)));
+    const witnessOk = fails.length > 0 && missing.length === 0 && unexpected.length === 0;
+    report.witness = { require: witnessRequire, tolerate: witnessTolerate, missing, unexpected, ok: witnessOk };
+    exitCode = witnessOk ? 0 : 1;
+    console.log(`SMOKE_WITNESS label=${label} ok=${witnessOk} required=${witnessRequire.length} missing=${JSON.stringify(missing)} unexpected=${JSON.stringify(unexpected)}`);
+  }
   writeFileSync(join(out, `smoke-${label}.json`), JSON.stringify(report, null, 2));
   const l = report.load || {};
   const r = report.render || {};

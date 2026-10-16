@@ -191,6 +191,30 @@ thread_local! {
     static BRIDGE: RefCell<Option<Rc<RefCell<State>>>> = const { RefCell::new(None) };
 }
 
+#[cfg(feature = "evora-witness")]
+thread_local! {
+    /// The bench's witness build: the next `evora:dirty {dirty: false}` after a save is dropped.
+    static WITNESS_SKIP_CLEAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The bench's witness build (feature `evora-witness`, never in the artefact): a save was sent.
+#[cfg(feature = "evora-witness")]
+fn witness_saved() {
+    WITNESS_SKIP_CLEAN.with(|w| w.set(true));
+}
+#[cfg(not(feature = "evora-witness"))]
+fn witness_saved() {}
+
+/// The bench's witness build: drop this `evora:dirty` (the first clean one after a save).
+#[cfg(feature = "evora-witness")]
+fn witness_drops(now: bool) -> bool {
+    !now && WITNESS_SKIP_CLEAN.with(|w| w.replace(false))
+}
+#[cfg(not(feature = "evora-witness"))]
+fn witness_drops(_now: bool) -> bool {
+    false
+}
+
 fn bridge() -> Option<Rc<RefCell<State>>> {
     BRIDGE.with(|b| b.borrow().clone())
 }
@@ -319,6 +343,9 @@ pub fn dirty(now: bool) {
     }
     let Some(doc_ref) = st.current.as_ref().map(|d| d.doc_ref.clone()) else { return };
     st.last_dirty = Some(now);
+    if witness_drops(now) {
+        return;
+    }
     if let Some(payload) = object(&[("dirty", now.into()), ("docRef", doc_ref.into())]) {
         let _ = send(&st, "evora:dirty", None, &payload, None);
     }
@@ -380,6 +407,7 @@ pub fn write(path: &str, data: &[u8]) -> HostWrite {
     if save_as {
         st.copies.push(path.to_string());
     }
+    witness_saved();
     HostWrite::Sent
 }
 
@@ -442,10 +470,11 @@ fn is_origin(o: &str) -> bool {
 }
 
 fn receive(state: &Rc<RefCell<State>>, event: &web_sys::MessageEvent) {
-    // §5.1: source AND origin.
+    // §5.1: source AND origin (the bench's witness build skips the source check).
     {
         let Ok(st) = state.try_borrow() else { return };
-        if event.origin() != st.origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &st.parent)) {
+        let from_parent = cfg!(feature = "evora-witness") || event.source().is_some_and(|s| js_sys::Object::is(&s, &st.parent));
+        if event.origin() != st.origin || !from_parent {
             return;
         }
     }
@@ -812,6 +841,16 @@ fn on_purge(state: &Rc<RefCell<State>>, id: &str, p: &JsValue) {
             return;
         }
         st.purging = true;
+    }
+    if cfg!(feature = "evora-witness") {
+        // The bench's witness build: no writer stops, and the answer goes before the stores.
+        state.borrow_mut().purging = false;
+        ack(&state.borrow(), id, true, None);
+        let mode = if all { "all" } else { "current" };
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = JsFuture::from(storage_purge(mode, false)).await;
+        });
+        return;
     }
     // §7.7: every writer stops first, for good: the store's flushes and session snapshots, the
     // disk cache, the frame workers (they write the cache); `storagePurge` ends the job workers,
