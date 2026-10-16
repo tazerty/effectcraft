@@ -1,6 +1,6 @@
 //! The app: startup (storage, session restore, hooks), the eframe app and the page glue.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -41,12 +41,61 @@ pub fn page_url(rel: &str) -> String {
 thread_local! {
     static ACTIONS: RefCell<Vec<Action>> = const { RefCell::new(Vec::new()) };
     static CTX: RefCell<Option<egui::Context>> = const { RefCell::new(None) };
+    /// Evora (E4): the running app's runner, to carry out posted actions between frames ([`pump`]).
+    static RUNNER: RefCell<Option<eframe::WebRunner>> = const { RefCell::new(None) };
+    /// Evora (E4): a [`pump`] of the posted actions is scheduled.
+    static PUMP: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Run `f` on the UI thread at the next frame.
+/// Evora (E4): milliseconds a posted action waits for a UI frame before it is carried out
+/// without one.
+const PUMP_AFTER_MS: i32 = 100;
+
+/// Run `f` on the UI thread at the next frame. Evora (E4): in the host bridge, also without a
+/// frame when none comes soon ([`pump`]).
 pub fn post(f: impl FnOnce(&mut EffectcraftApp) + 'static) {
     ACTIONS.with(|a| a.borrow_mut().push(Box::new(f)));
     repaint();
+    schedule_pump();
+}
+
+/// The egui context of the running app (`None` before it starts).
+pub(crate) fn egui_ctx() -> Option<egui::Context> {
+    CTX.with(|c| c.borrow().clone())
+}
+
+/// Evora (E4): in the host bridge, schedule a [`pump`] (one at a time).
+fn schedule_pump() {
+    if !crate::ehp::hosted() || PUMP.with(Cell::get) {
+        return;
+    }
+    let Some(window) = web_sys::window() else { return };
+    let run = Closure::once_into_js(|| {
+        PUMP.with(|p| p.set(false));
+        pump();
+    });
+    if window.set_timeout_with_callback_and_timeout_and_arguments_0(run.unchecked_ref(), PUMP_AFTER_MS).is_ok() {
+        PUMP.with(|p| p.set(true));
+    }
+}
+
+/// Evora (E4): carry out the posted actions no frame has taken yet. eframe draws its frames on
+/// `requestAnimationFrame` while the page is visible (on a timer once the tab is hidden), and the
+/// browser runs no animation frame for an iframe it doesn't paint (`display: none`, off screen),
+/// even in a visible tab: the answers to the Evora page (`evora:save`, `evora:ack`) must not wait
+/// for it. The `evora:dirty` an action causes is reported too.
+fn pump() {
+    if ACTIONS.with(|a| a.borrow().is_empty()) {
+        return;
+    }
+    let Some(runner) = RUNNER.with(|r| r.borrow().clone()) else { return };
+    // `None` during a frame, after a panic or before the app exists: the next frame takes them.
+    let Some(mut web) = runner.app_mut::<WebApp>() else { return };
+    let actions = ACTIONS.with(|a| std::mem::take(&mut *a.borrow_mut()));
+    for f in actions {
+        f(&mut web.app);
+    }
+    crate::ehp::dirty(web.app.session.is_dirty());
 }
 
 /// Ask for a UI frame.
@@ -90,10 +139,22 @@ impl eframe::App for WebApp {
         self.app.raw_input_hook(ctx, raw_input);
     }
 
+    /// Evora (E4): lets [`pump`] reach the app between frames (`WebRunner::app_mut`).
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(&mut *self)
+    }
+
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let actions = ACTIONS.with(|a| std::mem::take(&mut *a.borrow_mut()));
         for f in actions {
             f(&mut self.app);
+        }
+        // Evora (E2, E4): in the host bridge, the settings the Evora page imposes (the theme of
+        // `evora:init` and `evora:theme`) apply here, in every pass, not only in a drawn frame:
+        // the UI draws nothing once the graphics device is lost (`ui` returns early) and gets no
+        // frame while its iframe isn't painted. Once per change (`prefs_revision`).
+        if crate::ehp::hosted() {
+            self.app.apply_prefs(ctx);
         }
         // Files dropped on the page: read them, then open/import.
         let dropped: Vec<web_sys::File> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.web_file().cloned()).collect());
@@ -355,8 +416,11 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
         }
         return Err(e);
     }
-    // Evora (E4): the editor runs with what `evora:init` set: accept it (`evora:ack`).
+    // Evora (E4): the editor runs with what `evora:init` set: accept it (`evora:ack`). The
+    // posted actions may run between frames from now on (actions posted before: pumped now).
     if host {
+        RUNNER.with(|r| *r.borrow_mut() = Some(runner.clone()));
+        schedule_pump();
         crate::ehp::init_applied();
     }
     // Hide the loading message once the app runs.
