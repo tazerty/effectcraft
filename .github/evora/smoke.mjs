@@ -216,6 +216,36 @@ function check(cond, msg) {
   }
 }
 
+// Diagnostics (EVORA-KIN-18), never a verdict: what the engine's frame shows at a given moment:
+// the page's visibility, how many animation frames it gets in a second, the editor's state as it
+// reports it (ui.inspect: theme, frames per second, widgets registered by the last drawn frame,
+// dialog), the appearance setting, the compositor. Printed as `SMOKE_DIAG <label> <where> {...}`.
+const DIAG_WAIT_MS = 5000;
+const ENGINE_DIAG = `(async () => {
+  const within = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r("timeout"), ${DIAG_WAIT_MS}))]);
+  const raf = await within(new Promise((res) => { let n = 0; const t0 = performance.now();
+    const tick = () => { n += 1; if (performance.now() - t0 < 1000) requestAnimationFrame(tick); else res(n); }; requestAnimationFrame(tick); }));
+  let inspect = null;
+  try { const r = await within(window.effectcraft.request("ui.inspect", {}));
+    inspect = r && r.ui ? { theme: r.ui.theme, fps: Math.round(r.fps || 0), elements: r.elements, windowFocused: r.windowFocused, dialog: r.dialog, window: r.window, renderMs: r.renderMs } : r;
+  } catch (e) { inspect = "error " + String(e); }
+  let mode = null;
+  try { mode = await within(window.effectcraft.execute("prefs.get", { key: "appearance.appearanceMode" })); } catch (e) { mode = "error " + String(e); }
+  let gpu = null;
+  try { const i = window.effectcraft.info(); gpu = i ? { gpu: i.gpu, backend: i.backend } : null; } catch (e) { gpu = "error " + String(e); }
+  return JSON.parse(JSON.stringify({ at: Date.now(), visibility: document.visibilityState, hasFocus: document.hasFocus(),
+    deviceLost: !!document.getElementById("device-lost"), raf, inspect, mode, gpu }));
+})()`;
+async function diag(ctx, where) {
+  try {
+    const d = await evalIn(ctx, ENGINE_DIAG, true, 30000);
+    (report.diag = report.diag || []).push({ where, ...d });
+    console.log(`SMOKE_DIAG ${label} ${where} ${JSON.stringify(d)}`);
+  } catch (e) {
+    console.log(`SMOKE_DIAG ${label} ${where} error ${e && e.message}`);
+  }
+}
+
 // ------------------------------------------------------------------ « pont-ehp » (E4, E5)
 
 // What the engine declares in evora:ready (src/ehp.rs), each capability exercised below;
@@ -363,6 +393,7 @@ async function runEhp(ectx, parentOrigin) {
   note("theme at init", theme1);
   check(frLabels.includes("Enregistrer"), "[ehp] langue d'evora:init (fr) absente des menus (« Enregistrer »)");
   check(/^dark/i.test(theme1), `[ehp] thème d'evora:init (sombre) absent : ${theme1}`);
+  await diag(ectx, "init");
 
   // 5. No answer to a window that isn't the parent, to an origin not admitted, to version 2; the
   //    parent's own request (the witness) is answered.
@@ -371,6 +402,7 @@ async function runEhp(ectx, parentOrigin) {
   await sleep(EHP_ROGUE_SETTLE_MS);
   await step("clean");
   s = await until("réponse à evora:request-save (témoin)", (x) => answersTo(x, x.ids.clean).length > 0);
+  if (!s) await diag(ectx, "clean");
   if (s) {
     check(ackOk(s, s.ids.clean, "clean"), `[ehp] témoin : evora:request-save sans réponse « clean » : ${JSON.stringify(answersTo(s, s.ids.clean))}`);
     for (const k of ["rogueSource", "rogueOrigin", "v2save"]) {
@@ -387,7 +419,11 @@ async function runEhp(ectx, parentOrigin) {
     const v = s.saves.find((x) => x.re === s.ids.save);
     note("save", v);
     check(v.docRef === s.ids.doc && v.name === "evora-smoke.ecproj" && v.saveAs === false && v.arrayBuffer && v.byteLength > 0 && v.items >= 1, `[ehp] evora:save inattendu : ${JSON.stringify(v)}`);
-    await until("evora:dirty {dirty: false} après l'enregistrement", (x) => x.log.some((m) => m.type === "evora:dirty" && m.payload && m.payload.dirty === false && m.at > v.at));
+    const after = await until("evora:dirty {dirty: false} après l'enregistrement", (x) => x.log.some((m) => m.type === "evora:dirty" && m.payload && m.payload.dirty === false && m.at > v.at));
+    if (!after) {
+      const tail = (await state()).log.slice(-8).map((m) => ({ type: m.type, at: m.at, re: m.re, dirty: m.payload ? m.payload.dirty : undefined }));
+      console.log(`SMOKE_DIAG ${label} dirty-after-save ${JSON.stringify({ saveAt: v.at, saveId: v.id, tail })}`);
+    }
   }
   // Save As: a copy (saveAs, the original docRef); the host's new docRef is the document after.
   await exec("file.saveAs", { path: "/evora-copie.ecproj" });
@@ -420,6 +456,11 @@ async function runEhp(ectx, parentOrigin) {
     note("live", { theme: theme2, labelsChanged: changed });
     check(deLabels.includes("Speichern") && changed >= 20, `[ehp] langue à chaud (de) absente : ${changed} libellés changés`);
     check(/^light/i.test(theme2), `[ehp] thème à chaud (clair) absent : ${theme2}`);
+    if (!/^light/i.test(theme2)) {
+      await diag(ectx, "live");
+      await sleep(3000);
+      await diag(ectx, "live+3s");
+    }
   }
 
   // 8. evora:purge: answered after the stores are gone, nothing comes back afterwards.
@@ -557,6 +598,7 @@ try {
       const theme = String(inspect && inspect.ui ? inspect.ui.theme : "");
       report.theme = { expected: expectTheme, shown: theme };
       check(theme.toLowerCase() === expectTheme, `thème imposé « ${expectTheme} » absent (thème affiché « ${theme} »)`);
+      await diag(ctx, "theme");
     }
     if (expectLang) {
       const differ = (initialLabels || []).filter((l, i) => englishLabels && l !== englishLabels[i]).length;
