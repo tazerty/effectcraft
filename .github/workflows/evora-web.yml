@@ -9,8 +9,8 @@
 #   épinglées par SHA complet. Les scripts des portes sont écrits par Evora (.github/evora/).
 # - Outils à version exacte, vérifiés : Rust (rustup), wasm-bindgen-cli (version de Cargo.lock et
 #   de xtask), cargo-deny et cargo-about (binaires de leur release, SHA-256 épinglé ci-dessous).
-#   Chrome, Node, Python, Perl, gzip et brotli sont ceux de l'image ubuntu-latest : leurs versions
-#   sont imprimées au journal.
+#   Chrome, Node, Python, Perl, gzip et brotli sont ceux de l'image ubuntu-24.04, épinglée (jamais
+#   ubuntu-latest, qui change d'image sans commit) : leurs versions sont imprimées au journal.
 # - Portes BLOQUANTES depuis E1 (EVORA-KIN-03) : témoins des détecteurs ; cargo-deny (licences et
 #   avis de sécurité, deny.toml) ; cargo-about (LICENSES/THIRD-PARTY-LICENSES.txt, --fail) ;
 #   fichiers d'hébergement absents ; marques ArtCraft absentes du site ; .br/.gz vérifiés ;
@@ -67,7 +67,7 @@ defaults:
 jobs:
   web:
     name: Web (wasm)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - name: Checkout
