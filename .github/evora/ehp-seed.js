@@ -31,7 +31,11 @@
       await w.write("seed");
       await w.close();
     }
-    for (const name of ["effectcraft-handles", `evns-${OTHER}--effectcraft-handles`, "evora-keep"]) {
+    // The account's own IndexedDB database and localStorage key too: kept by evora:init, deleted by
+    // evora:purge (the engine opens neither under Chrome before a folder is picked).
+    const dbs = ["effectcraft-handles", `evns-${OTHER}--effectcraft-handles`, "evora-keep"];
+    if (OWN) dbs.push(`evns-${OWN}--effectcraft-handles`);
+    for (const name of dbs) {
       await new Promise((res, rej) => {
         const r = indexedDB.open(name, 1);
         r.onupgradeneeded = () => r.result.createObjectStore("seed");
@@ -39,7 +43,9 @@
         r.onerror = () => rej(r.error);
       });
     }
-    for (const key of [`evns-${OTHER}--effectcraft`, "effectcraft-seed", "evora-keep"]) localStorage.setItem(key, "seed");
+    const keys = [`evns-${OTHER}--effectcraft`, "effectcraft-seed", "evora-keep"];
+    if (OWN) keys.push(`evns-${OWN}--effectcraft`);
+    for (const key of keys) localStorage.setItem(key, "seed");
     report({ listing: await list() });
   } catch (e) {
     report({ error: String((e && e.message) || e) });
