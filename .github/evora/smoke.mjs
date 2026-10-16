@@ -304,12 +304,14 @@ const LISTING = `(async () => { const out = { opfs: [], idb: [], ls: [] };
   try { out.idb = (await indexedDB.databases()).map((d) => d.name); } catch (e) { out.idbError = String(e); }
   try { for (let i = 0; i < localStorage.length; i++) out.ls.push(localStorage.key(i)); } catch (e) { out.lsError = String(e); }
   return out; })()`;
-// Every deletion the engine makes from now on, with the wall-clock time it completed (the purge's
-// answer, stamped on the same clock by the parent page, must come after them; performance.now()
-// of two documents isn't comparable). And every write the engine's page attempts from now on
-// (opening or creating an OPFS entry for writing, opening an IndexedDB database, setting a
-// localStorage key), with the time it was asked: after the purge's answer there must be none,
-// whether it would succeed or not (a stopped writer doesn't try).
+// Installed in the engine's page once the document is open. Every deletion the engine makes from
+// then on, with the wall-clock time it completed (the purge's answer, stamped on the same clock by
+// the parent page, must come after them; performance.now() of two documents isn't comparable).
+// And every write the engine's page attempts (opening or creating an OPFS entry for writing,
+// opening an IndexedDB database, setting a localStorage key), with the time it was asked: with
+// OPFS some are seen while the document is edited (the premise), in the memory mode none at all,
+// and after the purge's answer none, whether it would succeed or not (a stopped writer doesn't
+// try).
 const PURGE_HOOKS = `(() => { const log = (window.__evoraPurgeLog = []); const writes = (window.__evoraWriteLog = []); const at = () => Date.now();
   const rm = FileSystemDirectoryHandle.prototype.removeEntry;
   FileSystemDirectoryHandle.prototype.removeEntry = function (...a) { return rm.apply(this, a).then((v) => { log.push({ op: "opfs", name: a[0], at: at() }); return v; }); };
@@ -405,6 +407,7 @@ async function runEhp(ectx, parentOrigin) {
   await step("open");
   s = await until("accusé d'evora:open", (x) => answersTo(x, x.ids.open).length > 0);
   if (!s) return;
+  await evalIn(ectx, PURGE_HOOKS);
   const ready = s.log.filter((m) => m.type === "evora:ready");
   const rp = (ready[0] && ready[0].payload) || {};
   r.timing.ready = ready[0] ? Math.round(ready[0].at - navigatedAt) : null;
@@ -565,7 +568,7 @@ async function runEhp(ectx, parentOrigin) {
   // 8. evora:purge: answered after the stores are gone, nothing comes back afterwards.
   const beforePurge = await listing();
   r.beforePurge = beforePurge;
-  await evalIn(ectx, PURGE_HOOKS);
+  const purgeAt = Date.now();
   await step("purge");
   s = await until("accusé d'evora:purge", (x) => answersTo(x, x.ids.purge).length > 0);
   if (s) {
@@ -586,17 +589,21 @@ async function runEhp(ectx, parentOrigin) {
     check(recreated.length === 0, `[ehp] le moteur a recréé un magasin après evora:purge : ${JSON.stringify(recreated)}`);
     const writes = await evalIn(ectx, "JSON.parse(JSON.stringify(window.__evoraWriteLog || []))");
     const late = writes.filter((w) => w.at > ackAt);
+    const earlier = writes.filter((w) => w.at < purgeAt);
     r.purge.writes = writes;
+    console.log(`SMOKE_DIAG ${label} purge ${JSON.stringify({ purgeAt, ackAt, writes: writes.length, earlier: earlier.length, late: late.length, last: writes.slice(-6) })}`);
+    if (ehpMode === "memory") check(writes.length === 0, `[ehp] écriture du moteur en mode mémoire : ${JSON.stringify(writes.slice(0, 10))}`);
+    else check(earlier.length >= 1, "[ehp] prémisse des écritures : aucune écriture du moteur observée pendant l'édition (OPFS)");
     check(late.length === 0, `[ehp] écriture du moteur après evora:purge : ${JSON.stringify(late.slice(0, 10))}`);
     // Every deletion, read once they are all done: each of the account's stores (OPFS, IndexedDB,
     // localStorage) went, before the answer.
     const deletions = await evalIn(ectx, "JSON.parse(JSON.stringify(window.__evoraPurgeLog || []))");
     r.purge.deletions = deletions;
-    const own = deletions.filter((d) => storeNs(d.name) !== null || keyNs(d.name) !== null);
+    const own = deletions.filter((d) => d.at >= purgeAt && (storeNs(d.name) !== null || keyNs(d.name) !== null));
     check(own.length >= 1, `[ehp] aucune suppression observée pendant la purge : ${JSON.stringify(deletions)}`);
     check(deletions.every((d) => d.at <= ackAt), `[ehp] accusé d'evora:purge envoyé avant la fin des suppressions : ${JSON.stringify({ ackAt, deletions })}`);
     const doomed = engineStores(beforePurge).filter(([, , ns]) => ns === ehpNs || ns === "").map(([k, n]) => `${k}:${n}`);
-    const goneBeforeAck = new Set(deletions.filter((d) => d.at <= ackAt).map((d) => `${d.op}:${d.name}`));
+    const goneBeforeAck = new Set(deletions.filter((d) => d.at >= purgeAt && d.at <= ackAt).map((d) => `${d.op}:${d.name}`));
     const kept = doomed.filter((x) => !goneBeforeAck.has(x));
     r.purge.doomed = doomed;
     check(kept.length === 0, `[ehp] magasins du compte non supprimés avant l'accusé : ${JSON.stringify(kept)}`);
@@ -606,6 +613,7 @@ async function runEhp(ectx, parentOrigin) {
   // 9. Every message from the engine: its own window and origin, a plain object, EHP v1, the
   //    exact envelope, ULIDs, an outbound type; every answer correlated to a request.
   s = await state();
+  check(s.log.filter((m) => m.type === "evora:ready").length === 1, `[ehp] evora:ready reçu de nouveau en cours de séance : ${s.log.filter((m) => m.type === "evora:ready").length} fois`);
   const sent = new Set(Object.values(s.ids));
   for (const m of s.log) {
     if (!(m.fromEngine && m.plain && m.v === 1)) {
