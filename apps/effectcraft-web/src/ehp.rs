@@ -35,6 +35,11 @@
 //! `evora:purge` (§7.7 a) stops every writer first, for good (the store's flushes and session
 //! snapshots, the disk cache, the frame and job workers), then deletes the engine's browser stores
 //! (`js/host.js` `storagePurge`), lists them again, and only then answers.
+//!
+//! The requests that need the editor (`evora:open`, `evora:request-save`, `evora:lang`,
+//! `evora:theme`) run on the UI thread at the next frame, or without one shortly after when no
+//! frame comes (`crate::post`: the browser gives an iframe it doesn't paint no animation frame).
+//! `evora:theme` is answered once the editor shows the theme (`ui.theme`), `unsupported` otherwise.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -188,6 +193,11 @@ thread_local! {
 
 fn bridge() -> Option<Rc<RefCell<State>>> {
     BRIDGE.with(|b| b.borrow().clone())
+}
+
+/// The host bridge listens (an admitted parent page): posted actions may run between frames.
+pub fn hosted() -> bool {
+    BRIDGE.with(|b| b.borrow().is_some())
 }
 
 /// Read `evora-host.json`, find the admitted parent, listen, announce `evora:ready` and wait for
@@ -771,7 +781,18 @@ fn on_theme(id: &str, p: &JsValue) {
         // The accent is Evora's indigo already (patch E2); light or dark changes here, not saved.
         app.session.prefs.appearance.appearance_mode = if dark { "dark" } else { "light" }.to_string();
         app.session.prefs_changed();
-        answer(&id, true, None);
+        // Applied now (a drawn frame would apply it too, but none comes while the iframe isn't
+        // painted, nor once the graphics device is lost), and answered only once the editor shows it.
+        let shown = crate::egui_ctx().is_some_and(|ctx| {
+            app.apply_prefs(&ctx);
+            app.ui.theme.is_light() != dark
+        });
+        if shown {
+            answer(&id, true, None);
+        } else {
+            log::warn!("Evora host bridge: the {} appearance couldn't be applied", if dark { "dark" } else { "light" });
+            answer(&id, false, Some("unsupported"));
+        }
     });
 }
 
