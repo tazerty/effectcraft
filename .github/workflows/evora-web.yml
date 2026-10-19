@@ -11,8 +11,9 @@
 #   de xtask), cargo-deny et cargo-about (binaires de leur release, SHA-256 épinglé ci-dessous).
 #   Chrome, Node, Python, Perl, gzip et brotli sont ceux de l'image ubuntu-24.04, épinglée (jamais
 #   ubuntu-latest, qui change d'image sans commit) : leurs versions sont imprimées au journal.
-# - Portes BLOQUANTES depuis E1 (EVORA-KIN-03) : témoins des détecteurs ; cargo-deny (licences et
-#   avis de sécurité, deny.toml) ; cargo-about (LICENSES/THIRD-PARTY-LICENSES.txt, --fail) ;
+# - Portes BLOQUANTES depuis E1 (EVORA-KIN-03) : témoins des détecteurs ; cargo-deny (avis de
+#   sécurité, interdits, licences et sources depuis EVORA-KIN-23, deny.toml, avec un témoin de
+#   source git non admise) ; cargo-about (LICENSES/THIRD-PARTY-LICENSES.txt, --fail) ;
 #   fichiers d'hébergement absents ; marques ArtCraft absentes du site ; .br/.gz vérifiés ;
 #   empreintes CSP des scripts inline (csp-hashes.txt) ; test de fumée Chrome (iframe d'une autre
 #   origine, puis sous la CSP prévue, plus un témoin saboté qui doit échouer) ; evora-host.json
@@ -207,10 +208,41 @@ jobs:
       - name: Fetch dependencies (locked)
         run: cargo fetch --locked
 
-      - name: Licences and advisories (cargo-deny, web crate graph, wasm32)
+      # cargo-deny complet depuis EVORA-KIN-23 (CI-DENY-KIN) : avis, interdits, licences et sources
+      # (crates.io, storytold/filmcraft et storytold/craft-libs seulement, deny.toml). Témoin : une
+      # copie de deny.toml dont allow-git n'admet plus storytold/filmcraft doit faire rougir la
+      # catégorie « sources » sur ses crates, d'un seul motif, sans nommer craft-libs (craft-ui).
+      - name: Advisories, bans, licences and sources (cargo-deny, web crate graph, wasm32)
         run: |
           set -euo pipefail
-          cargo deny --manifest-path apps/effectcraft-web/Cargo.toml --locked check --show-stats advisories licenses
+          deny() { cargo deny --manifest-path apps/effectcraft-web/Cargo.toml --config "$1" --locked --color never check --show-stats "${@:2}"; }
+          deny deny.toml advisories bans licenses sources
+          sab="$RUNNER_TEMP/evora-deny-sabotage.toml"
+          log="$RUNNER_TEMP/evora-deny-sabotage.log"
+          python3 - deny.toml "$sab" <<'PY'
+          import sys
+          src, dst = sys.argv[1:]
+          s = open(src, encoding="utf-8").read()
+          a = '    "https://github.com/storytold/filmcraft",\n'
+          if s.count(a) != 1:
+              sys.exit(f"allow-git storytold/filmcraft introuvable (ou multiple) dans {src}")
+          open(dst, "w", encoding="utf-8").write(s.replace(a, ""))
+          PY
+          cmp -s deny.toml "$sab" && { echo "::error::copie sabotée de deny.toml identique à l'original"; exit 1; }
+          if deny "$sab" sources > "$log" 2>&1; then
+            cat "$log"
+            echo "::error::témoin des sources : une source git non admise (storytold/filmcraft) passe cargo-deny"
+            exit 1
+          fi
+          codes="$(grep -oE '^error\[[a-z0-9-]+\]' "$log" | sort -u | tr '\n' ' ' || true)"
+          ncodes="$(grep -oE '^error\[[a-z0-9-]+\]' "$log" | sort -u | wc -l | tr -d ' ' || true)"
+          if grep -q 'sources FAILED' "$log" && grep -q 'filmcraft' "$log" && ! grep -qE 'craft-libs|craft-ui' "$log" && [ "$ncodes" = 1 ]; then
+            echo "Témoin des sources OK : $(grep -c '^error\[' "$log") erreur(s) $codes sur storytold/filmcraft ; $(grep 'sources FAILED' "$log")"
+          else
+            cat "$log"
+            echo "::error::témoin des sources : cargo-deny ne rougit pas exactement sur la source git retirée (motifs : $codes)"
+            exit 1
+          fi
 
       - name: Build the web app (cargo xtask web, release)
         run: |

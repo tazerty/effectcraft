@@ -1,7 +1,8 @@
 # cargo-deny configuration of the Evora fork (written by Evora; the upstream repository has none).
 # Checked by .github/workflows/evora-web.yml: `cargo deny --manifest-path
-# apps/effectcraft-web/Cargo.toml check advisories licenses`, i.e. the crate graph of the web
-# build only (the shipped artefact), for the wasm32 target, without dev-dependencies.
+# apps/effectcraft-web/Cargo.toml --config deny.toml check advisories bans licenses sources`, i.e.
+# the crate graph of the web build only (the shipped artefact), for the wasm32 target, without
+# dev-dependencies; every category since EVORA-KIN-23 (bans and sources added).
 #
 # Nothing is relaxed silently: every allowed licence is listed below with the reason it is
 # acceptable, every ignored advisory must carry an `id` and a `reason`, and cargo-deny's
@@ -49,3 +50,27 @@ exceptions = [
 [licenses.private]
 # The workspace crates are `MIT OR Apache-2.0` (Cargo.toml) and are checked like the others.
 ignore = false
+
+[bans]
+# No crate is banned by name yet: what the shipped graph may contain is judged by the patches'
+# gates (E7 neutralisations) and, at each upstream version, by the surface diff (NR-12). Several
+# versions of one crate are reported (warnings stay in the job log), never refused: the graph is
+# upstream's. Wildcard requirements are allowed: they are the workspace's own path dependencies
+# (`{ path = "crates/…" }`), which come from no registry.
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+# Only crates.io, and the two git repositories upstream depends on, each pinned by revision in
+# Cargo.toml and Cargo.lock (D-19: the filmcraft revision stays the one of the tag):
+# storytold/filmcraft (media codecs and containers, 2c5ba7a7) and storytold/craft-libs
+# (craft-ui, 5c874d51). Any other registry or git source fails. The CI's witness removes
+# filmcraft from `allow-git` and requires this check to fail on it.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/storytold/filmcraft",
+    "https://github.com/storytold/craft-libs",
+]
