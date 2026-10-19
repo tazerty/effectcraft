@@ -106,6 +106,12 @@ const DEFAULT_FLAGS = [
   "--enable-unsafe-swiftshader",
   "--use-angle=swiftshader",
   "--ignore-gpu-blocklist",
+  // EVORA-KIN-27: on the runner's software GPU (SwiftShader) the page's WebGPU device was lost in
+  // every pass (« A valid external Instance reference no longer exists. »: the page's WebGPU
+  // connection dropped) after a first frame that holds the page for tens of seconds, and the
+  // editor drew nothing more (Q-15-3). Kept by stopping Chrome's GPU watchdog, which ends a GPU
+  // process that stays busy: the CI's GPU probe compares the passes with and without it.
+  "--disable-gpu-watchdog",
   "--window-size=1400,900",
 ];
 const unknownDrop = chromeDrop.filter((f) => !DEFAULT_FLAGS.includes(f));
