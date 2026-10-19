@@ -356,6 +356,10 @@ jobs:
           DIR: ${{ steps.pkg.outputs.dir }}
           WATCH_MS: "180000"
         run: |
+          # Le shell des pas est « bash -e -o pipefail » (defaults.run.shell) : -e est retiré ici, une
+          # passe rouge est le relevé attendu, pas un échec du pas (run 39186564288 : le pas est mort
+          # au premier rouge, sans rien imprimer).
+          set +e
           set -uo pipefail
           probe="$RUNNER_TEMP/evora-gpu-probe"
           mkdir -p "$probe/parent"
