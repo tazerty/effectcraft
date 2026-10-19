@@ -327,6 +327,21 @@ jobs:
       - name: Gate on sensitive terms after the display-name overrides (E9)
         run: python3 .github/evora/gates.py terms --repo . --mode "$EVORA_TERMS_GATE"
 
+      # Relevé de surface (NR-12, EVORA-KIN-33) : RAPPORT, jamais une porte. Graphe des crates du
+      # build web (wasm32, dépendances normales), imports du module WebAssembly et primitives réseau
+      # des scripts du site, à comparer au build de la branche précédente à chaque montée.
+      - name: Surface report (NR-12, report only)
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+        run: |
+          set +e
+          cargo tree --manifest-path apps/effectcraft-web/Cargo.toml --locked -e normal \
+            --target wasm32-unknown-unknown --prefix none --format '{p}' | LC_ALL=C sort -u | sed 's/^/SURFACE tree /'
+          echo "SURFACE tree status=${PIPESTATUS[0]}"
+          python3 .github/evora/surface.py imports --wasm "$DIR/effectcraft_web_bg.wasm"
+          python3 .github/evora/surface.py net --dir "$DIR"
+          exit 0
+
       # Témoin moteur du banc « pont-ehp » (EVORA-KIN-20) : la même crate web construite avec la
       # fonctionnalité evora-witness, qui casse exprès ce que le banc doit attraper (réponses qui
       # attendent une image, contrôle de la source, evora:dirty après l'enregistrement, purge sans
