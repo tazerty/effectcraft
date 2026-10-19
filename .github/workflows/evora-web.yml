@@ -346,6 +346,51 @@ jobs:
           echo "Moteur témoin : $(stat -c %s "$site/effectcraft_web_bg.wasm") octets (artefact : $(stat -c %s "$DIR/effectcraft_web_bg.wasm"))"
           echo "site=$site" >> "$GITHUB_OUTPUT"
 
+      # Relevé de diagnostic (EVORA-KIN-25), jamais un verdict : le périphérique graphique de la page
+      # du moteur était perdu dans toutes les passes de fumée (Q-15-3, run 38889819271). Quatre
+      # configurations du GPU logiciel du runner, chacune sur une passe d'une autre origine sans
+      # CSP, surveillée jusqu'à la perte du périphérique ou WATCH_MS : la configuration retenue
+      # passe ensuite aux passes du test de fumée. Ce pas imprime et ne peut pas échouer.
+      - name: GPU probe (diagnostic of the runner's software GPU, never a verdict)
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+          WATCH_MS: "180000"
+        run: |
+          set -uo pipefail
+          probe="$RUNNER_TEMP/evora-gpu-probe"
+          mkdir -p "$probe/parent"
+          QB=8611; QA=8612
+          python3 .github/evora/serve.py --root "$probe/parent" --port "$QB" > "$probe/serve-parent.log" 2>&1 &
+          python3 .github/evora/serve.py --root "$DIR" --port "$QA" > "$probe/serve-engine.log" 2>&1 &
+          for p in "$QB" "$QA"; do
+            for _ in $(seq 1 50); do
+              code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$p/" || true)"
+              [ "$code" != "000" ] && break
+              sleep 0.2
+            done
+          done
+          probe_pass() {
+            local name="$1" query="$2" add="$3"
+            cat > "$probe/parent/$name.html" <<HTML
+          <!doctype html>
+          <html><head><meta charset="utf-8"><title>Evora GPU probe</title><link rel="icon" href="data:,"></head>
+          <body style="margin:0"><iframe id="engine" src="http://127.0.0.1:$QA/index.html?storage=memory&amp;nosw$query" style="border:0;width:1360px;height:860px" allow="fullscreen; clipboard-read; clipboard-write" sandbox="allow-scripts allow-same-origin"></iframe></body></html>
+          HTML
+            node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$QB/$name.html" --engine="http://127.0.0.1:$QA" \
+              --label="probe-$name" --out="$probe" --watch="$WATCH_MS" --chrome-add="$add" > "$probe/$name.out" 2>&1
+            local rc=$?
+            echo "::group::GPU probe $name (query « $query », switches « $add »), exit $rc"
+            grep -E '^SMOKE(_[A-Z_]+)? ' "$probe/$name.out" | cut -c1-1500
+            echo "::endgroup::"
+            echo "PROBE $name exit=$rc : $(grep '^SMOKE_GPU ' "$probe/$name.out" | cut -c1-400)"
+          }
+          probe_pass base "" ""
+          probe_pass watchdog "" "--disable-gpu-watchdog"
+          probe_pass cpu-workers "&amp;nogpuworkers" ""
+          probe_pass watchdog-cpu-workers "&amp;nogpuworkers" "--disable-gpu-watchdog"
+          kill $(jobs -p) 2>/dev/null || true
+          exit 0
+
       - name: Smoke test (headless Chrome, engine framed by another origin)
         env:
           DIR: ${{ steps.pkg.outputs.dir }}
@@ -364,6 +409,9 @@ jobs:
           PZ=8608
           # Témoin moteur (EVORA-KIN-20) : le moteur construit avec evora-witness (PW).
           PW=8609
+          # Témoin de perte du périphérique graphique (EVORA-KIN-25) : la page du moteur servie avec
+          # un script qui détruit tout périphérique WebGPU dès sa création (PL).
+          PL=8610
           hashes="$(grep -o "^'sha256-[^']*'" "$DIR/csp-hashes.txt" | tr '\n' ' ')"
           [ -n "$hashes" ] || { echo "::error::csp-hashes.txt vide"; exit 1; }
           # La CSP prévue pour les documents du moteur (apps/kinetika/CLAUDE.md §6.5), le parent
@@ -393,7 +441,19 @@ jobs:
           open(dst, "w", encoding="utf-8").write(s.replace(a, a + "  if (stop) return { purged: [], remaining: [] };\n"))
           PY
           cmp -s "$DIR/$hostjs" "$smoke/host-purge-sabotage.js" && { echo "::error::copie sabotée de js/host.js identique à l'original"; exit 1; }
-          for p in "$PA" "$PC" "$PS"; do
+          # La copie sabotée de la page du moteur (servie par PL seulement) : lose-device.js chargé
+          # avant le script de démarrage, dont l'empreinte CSP est inchangée.
+          python3 - "$DIR/index.html" "$smoke/index-lose-device.html" <<'PY'
+          import sys
+          src, dst = sys.argv[1:]
+          s = open(src, encoding="utf-8").read()
+          a = '<script type="module">'
+          if s.count(a) != 1:
+              sys.exit(f"script de démarrage introuvable (ou multiple) dans {src}")
+          open(dst, "w", encoding="utf-8").write(s.replace(a, '<script src="evora-lose-device.js"></script>' + a))
+          PY
+          cmp -s "$DIR/index.html" "$smoke/index-lose-device.html" && { echo "::error::copie sabotée d'index.html identique à l'original"; exit 1; }
+          for p in "$PA" "$PC" "$PS" "$PL"; do
             # La passe sous CSP impose aussi la langue (E3, ?lang=fr) et le thème (E2, ?theme=light).
             if [ "$p" = "$PC" ]; then extra="&amp;lang=fr&amp;theme=light"; else extra=""; fi
             cat > "$smoke/parent/engine-$p.html" <<HTML
@@ -415,7 +475,9 @@ jobs:
             --map "/evora-host.json=$smoke/host-admit.json" --map "/$hostjs=$smoke/host-purge-sabotage.js" $seedmap > "$smoke/serve-purge-sabotage.log" 2>&1 &
           python3 .github/evora/serve.py --root "$WITNESS" --port "$PW" --header "Content-Security-Policy: $csp" \
             --map "/evora-host.json=$smoke/host-admit.json" $seedmap > "$smoke/serve-temoin-moteur.log" 2>&1 &
-          for p in "$PB" "$PA" "$PC" "$PS" "$PE" "$PT" "$PR" "$PZ" "$PW"; do
+          python3 .github/evora/serve.py --root "$DIR" --port "$PL" --header "Content-Security-Policy: $csp" \
+            --map "/index.html=$smoke/index-lose-device.html" --map "/evora-lose-device.js=.github/evora/lose-device.js" > "$smoke/serve-temoin-peripherique.log" 2>&1 &
+          for p in "$PB" "$PA" "$PC" "$PS" "$PE" "$PT" "$PR" "$PZ" "$PW" "$PL"; do
             for _ in $(seq 1 50); do
               code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$p/" || true)"
               [ "$code" != "000" ] && break
@@ -476,6 +538,13 @@ jobs:
             --parent="$(ehp_parent "http://127.0.0.1:$PW" "host=evora&nosw" '{}')" \
             --witness-require="[ehp] réponse à un message refusé (rogueSource)|[ehp] evora:dirty {dirty: false} après l'enregistrement : rien|[ehp] evora:save en réponse à evora:request-save, cadre masqué : rien|[ehp] accusé d'evora:purge envoyé avant la fin des suppressions|[ehp] écriture du moteur après evora:purge" \
             --witness-tolerate="[ehp] stockage du moteur non vide après evora:purge|[ehp] le moteur a recréé un magasin après evora:purge|[ehp] magasins du compte non supprimés avant l'accusé|erreur(s) de page"
+          # Témoin de perte du périphérique graphique (EVORA-KIN-25) : tout périphérique WebGPU de la
+          # page est détruit dès sa création ; le banc doit rougir sur le périphérique perdu (motif
+          # « Destroyed » : la destruction du témoin, pas une perte du runner) et sur l'écran vide.
+          witness "de perte du périphérique" "$smoke/temoin-peripherique.out" --parent="http://127.0.0.1:$PB/engine-$PL.html" --engine="http://127.0.0.1:$PL" \
+            --label=temoin-peripherique --out="$smoke" --languages=en \
+            --witness-require="périphérique graphique perdu : GPU device lost (Destroyed)|aucun widget à l'écran" \
+            --witness-tolerate="erreur(s) de page"
           # Témoin saboté : sous une empreinte CSP fausse le moteur ne doit pas démarrer, et le test le dit.
           if node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$PB/engine-$PS.html" --engine="http://127.0.0.1:$PS" \
             --label=csp-sabotage --out="$smoke" --timeout=30000 --settle=500 > "$smoke/sabotage.out" 2>&1; then
