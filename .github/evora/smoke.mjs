@@ -9,7 +9,9 @@
 // the frame or the engine's workers. It also reads the menus the engine draws (`ui.menu.list` in
 // every catalog language) and the widgets on screen (`ui.elements`), and counts ArtCraft marks and
 // default-emoji characters in them, and sensitive terms in the menu labels as drawn. Prints `SMOKE` lines, a JSON report and a
-// screenshot; exits non-zero on failure.
+// screenshot; exits non-zero on failure. Every pass that started also requires (EVORA-KIN-25) the
+// engine's graphics device alive at its end (no « device lost » notice, js/host.js showDeviceLost)
+// and widgets on screen (`ui.elements` not empty): the screen checks never judge an empty list.
 //
 //   node smoke.mjs --parent=http://127.0.0.1:8602/parent.html --engine=http://127.0.0.1:8601 \
 //     --label=plain --out=/tmp/smoke [--chrome=google-chrome] [--timeout=240000] [--terms=block]
@@ -52,7 +54,18 @@ const expectTheme = opt["expect-theme"] || "";
 // its `SMOKE` line still says ok=false.
 const witnessRequire = (opt["witness-require"] || "").split("|").filter(Boolean);
 const witnessTolerate = (opt["witness-tolerate"] || "").split("|").filter(Boolean);
-const LANGUAGES = ["en", "ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
+// `--chrome-add=A|B` and `--chrome-drop=C|D` (EVORA-KIN-25): Chrome switches added to, or removed
+// from, the default ones below (the CI's GPU probe compares configurations of the runner's
+// software GPU). `--watch=MS` (diagnostic): once the engine is ready, its graphics device and its
+// screen are read every WATCH_EVERY_MS for MS milliseconds (until the device is lost) and judged
+// at the end; no menu, no host bridge.
+const chromeAdd = (opt["chrome-add"] || "").split("|").filter(Boolean);
+const chromeDrop = (opt["chrome-drop"] || "").split("|").filter(Boolean);
+const watchMs = Number(opt.watch || 0);
+const WATCH_EVERY_MS = 5000;
+// `--languages=en,fr` (EVORA-KIN-25): the catalog languages whose menus are read (all by default;
+// the device-loss witness reads English only).
+const LANGUAGES = opt.languages ? opt.languages.split(",").filter(Boolean) : ["en", "ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
 const BRAND = /artcraft|discord\.gg|getartcraft/i;
 const EMOJI = /\p{Emoji_Presentation}|\u{FE0F}|\u{20E3}/u;
 const PICTO = /\p{Extended_Pictographic}/u;
@@ -79,7 +92,7 @@ const sessions = new Map();
 const report = { label, parentUrl, engineOrigin, ok: false };
 
 const profile = mkdtempSync(join(tmpdir(), "evora-chrome-"));
-const flags = [
+const DEFAULT_FLAGS = [
   "--headless=new",
   "--remote-debugging-port=0",
   `--user-data-dir=${profile}`,
@@ -94,14 +107,29 @@ const flags = [
   "--use-angle=swiftshader",
   "--ignore-gpu-blocklist",
   "--window-size=1400,900",
-  "about:blank",
 ];
+const unknownDrop = chromeDrop.filter((f) => !DEFAULT_FLAGS.includes(f));
+if (unknownDrop.length) {
+  console.error(`--chrome-drop: not a default switch: ${unknownDrop.join(" ")}`);
+  process.exit(2);
+}
+const flags = [...DEFAULT_FLAGS.filter((f) => !chromeDrop.includes(f)), ...chromeAdd, "about:blank"];
+report.chromeFlags = flags.filter((f) => !f.startsWith("--user-data-dir="));
 const proc = spawn(chrome, flags, { stdio: ["ignore", "ignore", "pipe"] });
 let chromeErr = "";
+// Chrome's own lines about the GPU (EVORA-KIN-25): its GPU process, the watchdog, Vulkan, Dawn,
+// SwiftShader; printed (SMOKE_GPU_LOG) when the graphics device is lost and in a watch.
+const GPU_LOG = /gpu|watchdog|vulkan|dawn|swiftshader|webgpu|angle|crash|exited|terminat/i;
+const GPU_LOG_MAX = 300;
+const gpuLog = [];
+let stderrTail = "";
 const wsUrl = await new Promise((resolve, reject) => {
   const t = setTimeout(() => reject(new Error(`Chrome did not print its DevTools URL: ${chromeErr.slice(-2000)}`)), 30000);
   proc.stderr.on("data", (d) => {
     chromeErr = (chromeErr + d).slice(-100000);
+    const lines = (stderrTail + d).split("\n");
+    stderrTail = lines.pop();
+    for (const l of lines) if (GPU_LOG.test(l) && gpuLog.length < GPU_LOG_MAX) gpuLog.push(`${Date.now()} ${l.slice(0, 400)}`);
     const m = chromeErr.match(/DevTools listening on (ws:\/\/\S+)/);
     if (m) {
       clearTimeout(t);
@@ -252,6 +280,99 @@ async function diag(ctx, where) {
   } catch (e) {
     console.log(`SMOKE_DIAG ${label} ${where} error ${e && e.message}`);
   }
+}
+
+// ------------------------------------------------------------------ graphics device and screen (EVORA-KIN-25)
+
+// The notice the engine's page shows once its WebGPU device is lost (js/host.js showDeviceLost),
+// its message, or false.
+const LOST_NOTICE = `(() => { const n = document.getElementById("device-lost"); return n ? (n.querySelector("small") || n).textContent.slice(0, 300) : false; })()`;
+// What the engine's frame shows at the end of a pass: the notice, the widgets of the last drawn
+// frame (`ui.elements`, -1 when the answer isn't a list) and the frame workers' GPU (diagnostic).
+const SCREEN_STATE = `(async () => { const lost = ${LOST_NOTICE};
+  const els = await window.effectcraft.request("ui.elements", {});
+  let workers = null; try { workers = window.effectcraft.info().frameWorkers; } catch (e) { workers = "error " + String(e); }
+  return JSON.parse(JSON.stringify({ lost, elements: Array.isArray(els) ? els.length : -1, workers })); })()`;
+// The adapter the engine's page gets (diagnostic): what the runner's browser offers WebGPU.
+const ADAPTER_INFO = `(async () => { if (!navigator.gpu) return "no navigator.gpu";
+  const a = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+  if (!a) return null; const i = a.info || {};
+  return { vendor: i.vendor, architecture: i.architecture, device: i.device, description: i.description,
+    fallback: !!(i.isFallbackAdapter || a.isFallbackAdapter), features: a.features ? a.features.size : null,
+    maxTexture2D: a.limits ? a.limits.maxTextureDimension2D : null }; })()`;
+// A reading of a watch: the notice, the widgets and the frame rate the editor reports.
+const WATCH_STATE = `(async () => { const lost = ${LOST_NOTICE};
+  const i = await Promise.race([window.effectcraft.request("ui.inspect", {}), new Promise((r) => setTimeout(() => r("timeout"), 3000))]);
+  return JSON.parse(JSON.stringify({ lost, elements: i && i.elements !== undefined ? i.elements : i, fps: i && i.fps !== undefined ? Math.round(i.fps) : null })); })()`;
+
+// The GPU as the browser reports it (SystemInfo): devices, driver, feature status. Diagnostic.
+async function systemGpu() {
+  try {
+    const si = await Promise.race([send("SystemInfo.getInfo"), sleep(15000).then(() => null)]);
+    const g = (si && si.gpu) || {};
+    report.systemGpu = si
+      ? { devices: (g.devices || []).map((d) => `${d.vendorString || d.vendorId} ${d.deviceString || d.deviceId} (${d.driverVendor || "?"} ${d.driverVersion || "?"})`), featureStatus: g.featureStatus || null }
+      : "timeout";
+    console.log(`SMOKE_DIAG ${label} system-gpu ${JSON.stringify(report.systemGpu)}`);
+  } catch (e) {
+    console.log(`SMOKE_DIAG ${label} system-gpu error ${e && e.message}`);
+  }
+}
+
+// The browser's GPU process histograms (lifetime, termination, crashes, hangs) and Chrome's GPU
+// lines, printed when the device is lost or in a watch. Diagnostic.
+async function gpuEvidence() {
+  try {
+    const r = await Promise.race([send("Browser.getHistograms", { query: "GPU" }), sleep(10000).then(() => ({ histograms: [] }))]);
+    const keep = (r.histograms || []).filter((h) => /Lifetime|Termination|Crash|Exit|Watchdog|Hang|Lost|WebGPU|Dawn/i.test(h.name)).slice(0, 40);
+    for (const h of keep) console.log(`SMOKE_GPU_HISTOGRAM ${label} ${h.name} n=${h.count} ${(h.buckets || []).map((b) => `${b.low}:${b.count}`).join(",")}`);
+    if (!keep.length) console.log(`SMOKE_GPU_HISTOGRAM ${label} none of ${(r.histograms || []).length}`);
+  } catch (e) {
+    console.log(`SMOKE_GPU_HISTOGRAM ${label} error ${e && e.message}`);
+  }
+  for (const l of gpuLog) console.log(`SMOKE_GPU_LOG ${label} ${l}`);
+  console.log(`SMOKE_GPU_LOG ${label} ${gpuLog.length} line(s)${gpuLog.length >= GPU_LOG_MAX ? " (capped)" : ""}`);
+}
+
+// A watch (`--watch`): the device and the screen, every WATCH_EVERY_MS, until the device is lost.
+async function watch(ctx) {
+  const t0 = Date.now();
+  const seen = (report.watch = []);
+  while (Date.now() - t0 < watchMs) {
+    let s;
+    try {
+      s = await evalIn(ctx, WATCH_STATE, true, 10000);
+    } catch (e) {
+      s = { error: String(e && e.message) };
+    }
+    const reading = { t: Date.now() - t0, ...s };
+    seen.push(reading);
+    console.log(`SMOKE_WATCH ${label} ${JSON.stringify(reading)}`);
+    if (s.lost) break;
+    await sleep(WATCH_EVERY_MS);
+  }
+}
+
+// The checks of every pass that started: the device alive, widgets on screen.
+async function judgeScreen(ctx) {
+  let s;
+  try {
+    s = await evalIn(ctx, SCREEN_STATE, true, 60000);
+  } catch (e) {
+    s = { lost: `unreadable (${e && e.message})`, elements: -1, workers: null };
+  }
+  report.screen = s;
+  let adapter = null;
+  try {
+    adapter = await evalIn(ctx, ADAPTER_INFO, true, 15000);
+  } catch (e) {
+    adapter = `error ${e && e.message}`;
+  }
+  report.screen.adapter = adapter;
+  console.log(`SMOKE_GPU label=${label} lost=${JSON.stringify(s.lost)} elements=${s.elements} adapter=${JSON.stringify(adapter)} workers=${JSON.stringify(s.workers).slice(0, 800)}`);
+  check(s.lost === false, `périphérique graphique perdu : ${s.lost}`);
+  check(s.elements > 0, `aucun widget à l'écran (ui.elements : ${s.elements})`);
+  return s;
 }
 
 // ------------------------------------------------------------------ « pont-ehp » (E4, E5)
@@ -651,6 +772,7 @@ let exitCode = 1;
 try {
   const version = await send("Browser.getVersion");
   report.chrome = version.product;
+  await systemGpu();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: page } = await send("Target.attachToTarget", { targetId, flatten: true });
   sessions.set(page, { type: "page", url: parentUrl });
@@ -706,12 +828,15 @@ try {
       : null;
     check(report.parent && report.parent.origin !== report.dom.origin, "le parent et le moteur ont la même origine");
     check(report.parent && report.parent.contentDocument !== "readable", "le parent lit le document du moteur (même origine)");
-    if (ehpMode) await runEhp(ctx, parentOrigin);
+    // A watch (diagnostic) reads the device and the screen only; the « pont-ehp » bench runs the
+    // host bridge.
+    if (watchMs > 0) await watch(ctx);
+    else if (ehpMode) await runEhp(ctx, parentOrigin);
     // What the engine draws: the menus in every catalog language and the widgets on screen
     // (not in the « pont-ehp » bench: the other passes read them).
     const labels = [];
     const perLanguage = {};
-    if (!ehpMode) {
+    if (!ehpMode && !watchMs) {
     const menuLabels = () => evalIn(ctx, `window.effectcraft.request("ui.menu.list", {}).then((r) => r.map((i) => String(i.label ?? "")))`, true, 60000);
     const initialLabels = expectLang ? await menuLabels() : null;
     let englishLabels = null;
@@ -759,8 +884,10 @@ try {
       warnings.push(`ui.elements: ${e.message}`);
       return [];
     });
-    // Widgets on screen: their automation labels (source strings), checked for marks and emoji.
+    // Widgets on screen: their automation labels (source strings), checked for marks and emoji;
+    // never on an empty list (EVORA-KIN-25: a lost graphics device draws no widget).
     for (const el of elements || []) labels.push(["screen", String(el.label ?? ""), "screen"]);
+    check(Array.isArray(elements) && elements.length > 0, `aucun widget à l'écran : les contrôles d'écran (marques, émojis) portent sur une liste vide (${JSON.stringify(elements).slice(0, 80)})`);
     const hits = (re, only) => labels.filter(([, t, src]) => (!only || src === only) && re.test(t));
     report.render = {
       menuItemsPerLanguage: perLanguage,
@@ -778,6 +905,10 @@ try {
     check(report.render.emoji.length === 0, `émojis au rendu : ${JSON.stringify(report.render.emoji)}`);
     if (termsMode === "block") check(report.render.termsCount === 0, `termes sensibles au rendu : ${JSON.stringify(report.render.terms)}`);
     }
+    // Every pass that started (EVORA-KIN-25): the graphics device alive and widgets on screen at
+    // its end; the GPU evidence when they aren't.
+    const screen = await judgeScreen(ctx);
+    if (watchMs > 0 || screen.lost !== false || !(screen.elements > 0)) await gpuEvidence();
     const shot = await send("Page.captureScreenshot", { format: "png" }, page);
     writeFileSync(join(out, `smoke-${label}.png`), Buffer.from(shot.data, "base64"));
   }
@@ -807,7 +938,7 @@ try {
   const l = report.load || {};
   const r = report.render || {};
   console.log(
-    `SMOKE label=${label} ok=${report.ok} theme=${report.theme ? report.theme.shown : "-"} ehp=${report.ehp ? `${report.ehp.mode}:${report.ehp.backend ?? "-"}:${(report.ehp.messages || []).length}msg` : "-"} lang=${report.lang ? `${report.lang.expected}:${report.lang.translatedAtStart}` : "-"} links=${report.links ? `${report.links.pagesBefore}->${report.links.pagesAfter}/${report.links.errorsDuring.length}` : "-"} chrome="${report.chrome}" wall_ready_ms=${report.wallReadyMs} wasm_ms=${l.wasmMs !== undefined ? Math.round(l.wasmMs) : "-"} ready_ms=${l.readyMs !== undefined ? Math.round(l.readyMs) : "-"} backend=${report.info ? JSON.stringify(report.info.backend ?? null) : "-"} webgpu=${report.info ? report.info.webgpu : "-"} errors=${errors.length} csp=${issues.length} texts=${r.texts ?? "-"} brand=${r.brand ? r.brand.length : "-"} emoji=${r.emoji ? r.emoji.length : "-"} terms=${r.termsCount ?? "-"}`,
+    `SMOKE label=${label} ok=${report.ok} theme=${report.theme ? report.theme.shown : "-"} ehp=${report.ehp ? `${report.ehp.mode}:${report.ehp.backend ?? "-"}:${(report.ehp.messages || []).length}msg` : "-"} lang=${report.lang ? `${report.lang.expected}:${report.lang.translatedAtStart}` : "-"} links=${report.links ? `${report.links.pagesBefore}->${report.links.pagesAfter}/${report.links.errorsDuring.length}` : "-"} chrome="${report.chrome}" wall_ready_ms=${report.wallReadyMs} wasm_ms=${l.wasmMs !== undefined ? Math.round(l.wasmMs) : "-"} ready_ms=${l.readyMs !== undefined ? Math.round(l.readyMs) : "-"} backend=${report.info ? JSON.stringify(report.info.backend ?? null) : "-"} webgpu=${report.info ? report.info.webgpu : "-"} errors=${errors.length} csp=${issues.length} lost=${report.screen ? JSON.stringify(report.screen.lost) : "-"} elements=${report.screen ? report.screen.elements : "-"} texts=${r.texts ?? "-"} brand=${r.brand ? r.brand.length : "-"} emoji=${r.emoji ? r.emoji.length : "-"} terms=${r.termsCount ?? "-"}`,
   );
   for (const e of errors.slice(0, 30)) console.log(`SMOKE_ERROR ${e}`);
   for (const i of issues.slice(0, 10)) console.log(`SMOKE_CSP ${i}`);
@@ -833,6 +964,7 @@ try {
       `| Langue imposée (E3) | ${report.lang ? `${report.lang.expected} : ${report.lang.translatedAtStart} libellés de menu traduits dès le démarrage sur ${report.lang.labels}` : "non vérifiée"} |`,
       `| Pont EHP et stockage (E4, E5) | ${report.ehp ? `${report.ehp.mode}, stockage ${report.ehp.backend ?? "-"} ; échanges : ${(report.ehp.messages || []).join(" ")} ; après evora:init OPFS ${JSON.stringify(report.ehp.afterInit ? report.ehp.afterInit.opfs : null)} ; après evora:purge OPFS ${JSON.stringify(report.ehp.purge ? report.ehp.purge.afterPurge.opfs : null)}, IndexedDB ${JSON.stringify(report.ehp.purge ? report.ehp.purge.afterPurge.idb : null)}` : "non vérifié"} |`,
       `| Liens externes (E7 : 4 commandes Help) | ${report.links ? `pages ${report.links.pagesBefore} -> ${report.links.pagesAfter}, erreurs ${report.links.errorsDuring.length}` : "non vérifié"} |`,
+      `| Périphérique graphique / widgets à l'écran (fin de passe) | ${report.screen ? `${report.screen.lost === false ? "vivant" : `perdu (${report.screen.lost})`} / ${report.screen.elements}` : "non vérifié"} |`,
       "",
     ];
     if (report.failures.length) rows.push(...report.failures.map((f) => `- échec : ${f}`), "");
