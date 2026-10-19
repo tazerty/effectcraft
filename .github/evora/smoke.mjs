@@ -477,6 +477,10 @@ async function runEhp(ectx, parentOrigin) {
   r.seed = seed;
   r.timing = { navigation: navigatedAt, seed: seedEntry ? Math.round(seedEntry.at - navigatedAt) : null };
   check(!!(seed && seed.listing && ["opfs", "idb", "ls"].every((k) => seeded[k].every((n) => seed.listing[k].includes(n)))), `[ehp] amorçage incomplet : ${JSON.stringify(seed)}`);
+  // NR-5 (EVORA-KIN-31): every seeded cache folder holds a `v1/mattes/` entry (cache kind of
+  // v0.11.1), so the folders evora:init and evora:purge must remove carry that kind too.
+  const seededMattes = seeded.opfs.filter((n) => n.endsWith("effectcraft-cache"));
+  check(!!(seed && seed.listing && Array.isArray(seed.listing.mattes) && seededMattes.length === 3 && seededMattes.every((n) => seed.listing.mattes.includes(n))), `[ehp] amorçage incomplet (cache mattes) : ${JSON.stringify(seed && seed.listing ? seed.listing.mattes : null)}`);
 
   // 2. evora:ready, once; evora:init accepted, the version 2 copy ignored.
   s = await until("evora:ready", (x) => x.log.some((m) => m.type === "evora:ready"), EHP_READY_WAIT_MS);
