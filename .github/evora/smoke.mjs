@@ -106,12 +106,18 @@ const DEFAULT_FLAGS = [
   "--enable-unsafe-swiftshader",
   "--use-angle=swiftshader",
   "--ignore-gpu-blocklist",
-  // EVORA-KIN-27: on the runner's software GPU (SwiftShader) the page's WebGPU device was lost in
-  // every pass (« A valid external Instance reference no longer exists. »: the page's WebGPU
-  // connection dropped) after a first frame that holds the page for tens of seconds, and the
-  // editor drew nothing more (Q-15-3). Kept by stopping Chrome's GPU watchdog, which ends a GPU
-  // process that stays busy: the CI's GPU probe compares the passes with and without it.
-  "--disable-gpu-watchdog",
+  // EVORA-KIN-28: on the runner's software GPU the page's WebGPU device was lost in every pass
+  // (Q-15-3), the GPU process alive (GPU.ProcessLifetimeEvents: one launch, no crash, run
+  // 39194377234): Chrome found no shared image able to back the WebGPU canvas
+  // (« Could not find SharedImageBackingFactory … WebgpuSwapChainTexture … », then « GPU state
+  // invalid »), WebGPU on Vulkan (SwiftShader) and the compositor on ANGLE having no common
+  // backing. Vulkan in the GPU process, on SwiftShader, for WebGPU too, without a silent fallback
+  // to GL (candidate; the CI's GPU probe compares it with the configuration before and others).
+  // The GPU watchdog (EVORA-KIN-27) changed nothing and is no longer stopped.
+  "--enable-features=Vulkan",
+  "--use-vulkan=swiftshader",
+  "--use-webgpu-adapter=swiftshader",
+  "--disable-vulkan-fallback-to-gl-for-testing",
   "--window-size=1400,900",
 ];
 const unknownDrop = chromeDrop.filter((f) => !DEFAULT_FLAGS.includes(f));

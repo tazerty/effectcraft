@@ -346,17 +346,17 @@ jobs:
           echo "Moteur témoin : $(stat -c %s "$site/effectcraft_web_bg.wasm") octets (artefact : $(stat -c %s "$DIR/effectcraft_web_bg.wasm"))"
           echo "site=$site" >> "$GITHUB_OUTPUT"
 
-      # Relevé de diagnostic (EVORA-KIN-25, matrice d'EVORA-KIN-27), jamais un verdict : le
+      # Relevé de diagnostic (EVORA-KIN-25, matrice d'EVORA-KIN-28), jamais un verdict : le
       # périphérique graphique de la page du moteur était perdu dans toutes les passes de fumée
-      # (Q-15-3, run 38889819271). Quatre configurations du GPU logiciel du runner, chacune sur une
-      # passe d'une autre origine sans CSP, surveillée jusqu'à la perte du périphérique ou WATCH_MS :
-      # les défauts de smoke.mjs (avec --disable-gpu-watchdog depuis EVORA-KIN-27), sans ce
-      # commutateur (la configuration d'avant), et les deux avec ?nogpuworkers (workers d'images
-      # sur leur processeur). Ce pas imprime et ne peut pas échouer.
+      # (Q-15-3), faute de mémoire partagée pour le canevas WebGPU (run 39194377234). Sept
+      # configurations du GPU logiciel du runner, chacune sur une passe d'une autre origine sans
+      # CSP, surveillée jusqu'à la perte du périphérique ou WATCH_MS : les défauts de smoke.mjs
+      # (Vulkan sur SwiftShader, pour WebGPU aussi, sans repli sur GL), la configuration d'avant,
+      # et des variantes. Ce pas imprime et ne peut pas échouer.
       - name: GPU probe (diagnostic of the runner's software GPU, never a verdict)
         env:
           DIR: ${{ steps.pkg.outputs.dir }}
-          WATCH_MS: "180000"
+          WATCH_MS: "120000"
         run: |
           # Le shell des pas est « bash -e -o pipefail » (defaults.run.shell) : -e est retiré ici, une
           # passe rouge est le relevé attendu, pas un échec du pas (run 39186564288 : le pas est mort
@@ -390,10 +390,14 @@ jobs:
             echo "::endgroup::"
             echo "PROBE $name exit=$rc : $(grep '^SMOKE_GPU ' "$probe/$name.out" | cut -c1-400)"
           }
+          vk="--enable-features=Vulkan|--use-vulkan=swiftshader|--use-webgpu-adapter=swiftshader|--disable-vulkan-fallback-to-gl-for-testing"
           probe_pass defauts "" "" ""
-          probe_pass sans-correctif "" "" "--disable-gpu-watchdog"
-          probe_pass defauts-cpu-workers "&amp;nogpuworkers" "" ""
-          probe_pass sans-correctif-cpu-workers "&amp;nogpuworkers" "" "--disable-gpu-watchdog"
+          probe_pass sans-correctif "" "" "$vk"
+          probe_pass vulkan-adaptateur-par-defaut "" "" "--use-webgpu-adapter=swiftshader|--disable-vulkan-fallback-to-gl-for-testing"
+          probe_pass angle-vulkan "" "--use-angle=vulkan" "--use-angle=swiftshader"
+          probe_pass vulkan-depuis-angle "" "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan" "--enable-features=Vulkan"
+          probe_pass adaptateur-gles "" "--use-webgpu-adapter=opengles" "$vk"
+          probe_pass sans-surface-vulkan "" "--disable-vulkan-surface" ""
           kill $(jobs -p) 2>/dev/null || true
           exit 0
 
@@ -546,7 +550,8 @@ jobs:
             --witness-tolerate="[ehp] stockage du moteur non vide après evora:purge|[ehp] le moteur a recréé un magasin après evora:purge|[ehp] magasins du compte non supprimés avant l'accusé|erreur(s) de page"
           # Témoin de perte du périphérique graphique (EVORA-KIN-25) : tout périphérique WebGPU de la
           # page est détruit dès sa création ; le banc doit rougir sur le périphérique perdu (motif
-          # « Destroyed » : la destruction du témoin, pas une perte du runner) et sur l'écran vide.
+          # « Destroyed ») et sur l'écran vide. Une perte du runner peut porter le même motif (run
+          # 39194377234) : le témoin ne discrimine que si les passes nominales sont vertes.
           witness "de perte du périphérique" "$smoke/temoin-peripherique.out" --parent="http://127.0.0.1:$PB/engine-$PL.html" --engine="http://127.0.0.1:$PL" \
             --label=temoin-peripherique --out="$smoke" --languages=en \
             --witness-require="périphérique graphique perdu : GPU device lost (Destroyed)|aucun widget à l'écran" \
