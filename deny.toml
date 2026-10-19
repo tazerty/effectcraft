@@ -65,8 +65,9 @@ highlight = "all"
 # Only crates.io, and the two git repositories upstream depends on, each pinned by revision in
 # Cargo.toml and Cargo.lock (D-19: the filmcraft revision stays the one of the tag):
 # storytold/filmcraft (media codecs and containers, 2c5ba7a7) and storytold/craft-libs
-# (craft-ui, 5c874d51). Any other registry or git source fails. The CI's witness removes
-# filmcraft from `allow-git` and requires this check to fail on it.
+# (craft-ui 5c874d51; since upstream v0.11.1 also craft-docpath 82a24b00, craft-pdf and its
+# hayro-syntax ca50d63b, EVORA-KIN-30). Any other registry or git source fails. The CI's witness
+# removes filmcraft from `allow-git` and requires this check to fail on it.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
