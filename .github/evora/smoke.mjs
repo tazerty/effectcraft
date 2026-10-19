@@ -54,15 +54,6 @@ const expectTheme = opt["expect-theme"] || "";
 // its `SMOKE` line still says ok=false.
 const witnessRequire = (opt["witness-require"] || "").split("|").filter(Boolean);
 const witnessTolerate = (opt["witness-tolerate"] || "").split("|").filter(Boolean);
-// `--chrome-add=A|B` and `--chrome-drop=C|D` (EVORA-KIN-25): Chrome switches added to, or removed
-// from, the default ones below (the CI's GPU probe compares configurations of the runner's
-// software GPU). `--watch=MS` (diagnostic): once the engine is ready, its graphics device and its
-// screen are read every WATCH_EVERY_MS for MS milliseconds (until the device is lost) and judged
-// at the end; no menu, no host bridge.
-const chromeAdd = (opt["chrome-add"] || "").split("|").filter(Boolean);
-const chromeDrop = (opt["chrome-drop"] || "").split("|").filter(Boolean);
-const watchMs = Number(opt.watch || 0);
-const WATCH_EVERY_MS = 5000;
 // `--languages=en,fr` (EVORA-KIN-25): the catalog languages whose menus are read (all by default;
 // the device-loss witness reads English only).
 const LANGUAGES = opt.languages ? opt.languages.split(",").filter(Boolean) : ["en", "ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
@@ -110,27 +101,23 @@ const DEFAULT_FLAGS = [
   // (Q-15-3), the GPU process alive (GPU.ProcessLifetimeEvents: one launch, no crash, run
   // 39194377234): Chrome found no shared image able to back the WebGPU canvas
   // (« Could not find SharedImageBackingFactory … WebgpuSwapChainTexture … », then « GPU state
-  // invalid »), WebGPU on Vulkan (SwiftShader) and the compositor on ANGLE having no common
-  // backing. Vulkan in the GPU process, on SwiftShader, for WebGPU too, without a silent fallback
-  // to GL (candidate; the CI's GPU probe compares it with the configuration before and others).
-  // The GPU watchdog (EVORA-KIN-27) changed nothing and is no longer stopped.
+  // invalid »). Vulkan in the GPU process, on SwiftShader, keeps it (GPU probe of run 39196935391:
+  // kept 120 s with these four switches, and with the first two alone; lost in 3 s without them,
+  // lost after 50 s with ANGLE on Vulkan). The WebGPU adapter is named and the fallback to GL
+  // (the configuration that loses the device) refused, so that a change of the runner shows.
+  // The GPU watchdog (EVORA-KIN-27) changed nothing and is not stopped.
   "--enable-features=Vulkan",
   "--use-vulkan=swiftshader",
   "--use-webgpu-adapter=swiftshader",
   "--disable-vulkan-fallback-to-gl-for-testing",
   "--window-size=1400,900",
 ];
-const unknownDrop = chromeDrop.filter((f) => !DEFAULT_FLAGS.includes(f));
-if (unknownDrop.length) {
-  console.error(`--chrome-drop: not a default switch: ${unknownDrop.join(" ")}`);
-  process.exit(2);
-}
-const flags = [...DEFAULT_FLAGS.filter((f) => !chromeDrop.includes(f)), ...chromeAdd, "about:blank"];
+const flags = [...DEFAULT_FLAGS, "about:blank"];
 report.chromeFlags = flags.filter((f) => !f.startsWith("--user-data-dir="));
 const proc = spawn(chrome, flags, { stdio: ["ignore", "ignore", "pipe"] });
 let chromeErr = "";
 // Chrome's own lines about the GPU (EVORA-KIN-25): its GPU process, the watchdog, Vulkan, Dawn,
-// SwiftShader; printed (SMOKE_GPU_LOG) when the graphics device is lost and in a watch.
+// SwiftShader; printed (SMOKE_GPU_LOG) when the graphics device is lost or no widget is on screen.
 const GPU_LOG = /gpu|watchdog|vulkan|dawn|swiftshader|webgpu|angle|crash|exited|terminat/i;
 const GPU_LOG_MAX = 300;
 const gpuLog = [];
@@ -312,10 +299,6 @@ const ADAPTER_INFO = `(async () => { if (!navigator.gpu) return "no navigator.gp
   return { vendor: i.vendor, architecture: i.architecture, device: i.device, description: i.description,
     fallback: !!(i.isFallbackAdapter || a.isFallbackAdapter), features: a.features ? a.features.size : null,
     maxTexture2D: a.limits ? a.limits.maxTextureDimension2D : null }; })()`;
-// A reading of a watch: the notice, the widgets and the frame rate the editor reports.
-const WATCH_STATE = `(async () => { const lost = ${LOST_NOTICE};
-  const i = await Promise.race([window.effectcraft.request("ui.inspect", {}), new Promise((r) => setTimeout(() => r("timeout"), 3000))]);
-  return JSON.parse(JSON.stringify({ lost, elements: i && i.elements !== undefined ? i.elements : i, fps: i && i.fps !== undefined ? Math.round(i.fps) : null })); })()`;
 
 // The GPU as the browser reports it (SystemInfo): devices, driver, feature status. Diagnostic.
 async function systemGpu() {
@@ -332,7 +315,7 @@ async function systemGpu() {
 }
 
 // The browser's GPU process histograms (lifetime, termination, crashes, hangs) and Chrome's GPU
-// lines, printed when the device is lost or in a watch. Diagnostic.
+// lines, printed when the device is lost or no widget is on screen. Diagnostic.
 async function gpuEvidence() {
   try {
     const r = await Promise.race([send("Browser.getHistograms", { query: "GPU" }), sleep(10000).then(() => ({ histograms: [] }))]);
@@ -344,25 +327,6 @@ async function gpuEvidence() {
   }
   for (const l of gpuLog) console.log(`SMOKE_GPU_LOG ${label} ${l}`);
   console.log(`SMOKE_GPU_LOG ${label} ${gpuLog.length} line(s)${gpuLog.length >= GPU_LOG_MAX ? " (capped)" : ""}`);
-}
-
-// A watch (`--watch`): the device and the screen, every WATCH_EVERY_MS, until the device is lost.
-async function watch(ctx) {
-  const t0 = Date.now();
-  const seen = (report.watch = []);
-  while (Date.now() - t0 < watchMs) {
-    let s;
-    try {
-      s = await evalIn(ctx, WATCH_STATE, true, 10000);
-    } catch (e) {
-      s = { error: String(e && e.message) };
-    }
-    const reading = { t: Date.now() - t0, ...s };
-    seen.push(reading);
-    console.log(`SMOKE_WATCH ${label} ${JSON.stringify(reading)}`);
-    if (s.lost) break;
-    await sleep(WATCH_EVERY_MS);
-  }
 }
 
 // The checks of every pass that started: the device alive, widgets on screen.
@@ -840,15 +804,12 @@ try {
       : null;
     check(report.parent && report.parent.origin !== report.dom.origin, "le parent et le moteur ont la même origine");
     check(report.parent && report.parent.contentDocument !== "readable", "le parent lit le document du moteur (même origine)");
-    // A watch (diagnostic) reads the device and the screen only; the « pont-ehp » bench runs the
-    // host bridge.
-    if (watchMs > 0) await watch(ctx);
-    else if (ehpMode) await runEhp(ctx, parentOrigin);
+    if (ehpMode) await runEhp(ctx, parentOrigin);
     // What the engine draws: the menus in every catalog language and the widgets on screen
     // (not in the « pont-ehp » bench: the other passes read them).
     const labels = [];
     const perLanguage = {};
-    if (!ehpMode && !watchMs) {
+    if (!ehpMode) {
     const menuLabels = () => evalIn(ctx, `window.effectcraft.request("ui.menu.list", {}).then((r) => r.map((i) => String(i.label ?? "")))`, true, 60000);
     const initialLabels = expectLang ? await menuLabels() : null;
     let englishLabels = null;
@@ -920,7 +881,7 @@ try {
     // Every pass that started (EVORA-KIN-25): the graphics device alive and widgets on screen at
     // its end; the GPU evidence when they aren't.
     const screen = await judgeScreen(ctx);
-    if (watchMs > 0 || screen.lost !== false || !(screen.elements > 0)) await gpuEvidence();
+    if (screen.lost !== false || !(screen.elements > 0)) await gpuEvidence();
     const shot = await send("Page.captureScreenshot", { format: "png" }, page);
     writeFileSync(join(out, `smoke-${label}.png`), Buffer.from(shot.data, "base64"));
   }

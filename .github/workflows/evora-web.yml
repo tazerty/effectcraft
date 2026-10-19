@@ -19,7 +19,9 @@
 #   origine, puis sous la CSP prévue, plus un témoin saboté qui doit échouer) ; evora-host.json
 #   livré neutre, pont muet ; banc « pont-ehp » : pont EHP v1 natif (E4, EVORA-KIN-14), espace de
 #   noms reçu par evora:init et purge (E5, EVORA-KIN-15), avec un témoin muet et un témoin de purge
-#   sabotée qui doivent échouer (EVORA-KIN-16). L'audit des émojis
+#   sabotée qui doivent échouer (EVORA-KIN-16) ; dans chaque passe, périphérique graphique vivant
+#   et widgets à l'écran (EVORA-KIN-25, Vulkan sur SwiftShader depuis EVORA-KIN-28), avec un
+#   témoin de perte du périphérique qui doit échouer. L'audit des émojis
 #   des catalogues (E10, EVORA-KIN-06) et les termes sensibles (E9, EVORA-KIN-08), mesurés
 #   jusqu'à leur patch, sont bloquants depuis (variables EVORA_* ci-dessous).
 # - L'artefact n'est envoyé qu'après toutes les portes : un artefact publié a passé les portes. Il
@@ -345,61 +347,6 @@ jobs:
           [ "$(cd "$site" && ls snippets/*/js/host.js | wc -l)" = 1 ] || { echo "::error::js/host.js du témoin introuvable ou multiple"; exit 1; }
           echo "Moteur témoin : $(stat -c %s "$site/effectcraft_web_bg.wasm") octets (artefact : $(stat -c %s "$DIR/effectcraft_web_bg.wasm"))"
           echo "site=$site" >> "$GITHUB_OUTPUT"
-
-      # Relevé de diagnostic (EVORA-KIN-25, matrice d'EVORA-KIN-28), jamais un verdict : le
-      # périphérique graphique de la page du moteur était perdu dans toutes les passes de fumée
-      # (Q-15-3), faute de mémoire partagée pour le canevas WebGPU (run 39194377234). Sept
-      # configurations du GPU logiciel du runner, chacune sur une passe d'une autre origine sans
-      # CSP, surveillée jusqu'à la perte du périphérique ou WATCH_MS : les défauts de smoke.mjs
-      # (Vulkan sur SwiftShader, pour WebGPU aussi, sans repli sur GL), la configuration d'avant,
-      # et des variantes. Ce pas imprime et ne peut pas échouer.
-      - name: GPU probe (diagnostic of the runner's software GPU, never a verdict)
-        env:
-          DIR: ${{ steps.pkg.outputs.dir }}
-          WATCH_MS: "120000"
-        run: |
-          # Le shell des pas est « bash -e -o pipefail » (defaults.run.shell) : -e est retiré ici, une
-          # passe rouge est le relevé attendu, pas un échec du pas (run 39186564288 : le pas est mort
-          # au premier rouge, sans rien imprimer).
-          set +e
-          set -uo pipefail
-          probe="$RUNNER_TEMP/evora-gpu-probe"
-          mkdir -p "$probe/parent"
-          QB=8611; QA=8612
-          python3 .github/evora/serve.py --root "$probe/parent" --port "$QB" > "$probe/serve-parent.log" 2>&1 &
-          python3 .github/evora/serve.py --root "$DIR" --port "$QA" > "$probe/serve-engine.log" 2>&1 &
-          for p in "$QB" "$QA"; do
-            for _ in $(seq 1 50); do
-              code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$p/" || true)"
-              [ "$code" != "000" ] && break
-              sleep 0.2
-            done
-          done
-          probe_pass() {
-            local name="$1" query="$2" add="$3" drop="$4"
-            cat > "$probe/parent/$name.html" <<HTML
-          <!doctype html>
-          <html><head><meta charset="utf-8"><title>Evora GPU probe</title><link rel="icon" href="data:,"></head>
-          <body style="margin:0"><iframe id="engine" src="http://127.0.0.1:$QA/index.html?storage=memory&amp;nosw$query" style="border:0;width:1360px;height:860px" allow="fullscreen; clipboard-read; clipboard-write" sandbox="allow-scripts allow-same-origin"></iframe></body></html>
-          HTML
-            node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$QB/$name.html" --engine="http://127.0.0.1:$QA" \
-              --label="probe-$name" --out="$probe" --watch="$WATCH_MS" --chrome-add="$add" --chrome-drop="$drop" > "$probe/$name.out" 2>&1
-            local rc=$?
-            echo "::group::GPU probe $name (query « $query », switches ajoutés « $add », retirés « $drop »), exit $rc"
-            grep -E '^SMOKE(_[A-Z_]+)? ' "$probe/$name.out" | cut -c1-1500
-            echo "::endgroup::"
-            echo "PROBE $name exit=$rc : $(grep '^SMOKE_GPU ' "$probe/$name.out" | cut -c1-400)"
-          }
-          vk="--enable-features=Vulkan|--use-vulkan=swiftshader|--use-webgpu-adapter=swiftshader|--disable-vulkan-fallback-to-gl-for-testing"
-          probe_pass defauts "" "" ""
-          probe_pass sans-correctif "" "" "$vk"
-          probe_pass vulkan-adaptateur-par-defaut "" "" "--use-webgpu-adapter=swiftshader|--disable-vulkan-fallback-to-gl-for-testing"
-          probe_pass angle-vulkan "" "--use-angle=vulkan" "--use-angle=swiftshader"
-          probe_pass vulkan-depuis-angle "" "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan" "--enable-features=Vulkan"
-          probe_pass adaptateur-gles "" "--use-webgpu-adapter=opengles" "$vk"
-          probe_pass sans-surface-vulkan "" "--disable-vulkan-surface" ""
-          kill $(jobs -p) 2>/dev/null || true
-          exit 0
 
       - name: Smoke test (headless Chrome, engine framed by another origin)
         env:
