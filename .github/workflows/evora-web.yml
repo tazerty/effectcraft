@@ -236,7 +236,8 @@ jobs:
           fi
           codes="$(grep -oE '^error\[[a-z0-9-]+\]' "$log" | sort -u | tr '\n' ' ' || true)"
           ncodes="$(grep -oE '^error\[[a-z0-9-]+\]' "$log" | sort -u | wc -l | tr -d ' ' || true)"
-          if grep -q 'sources FAILED' "$log" && grep -q 'filmcraft' "$log" && ! grep -qE 'craft-libs|craft-ui' "$log" && [ "$ncodes" = 1 ]; then
+          # craft-libs et craft-ui comme mots (« effectcraft-ui-egui » n'est pas craft-ui).
+          if grep -q 'sources FAILED' "$log" && grep -q 'filmcraft' "$log" && ! grep -qE '(^|[^A-Za-z0-9_-])craft-(libs|ui)([^A-Za-z0-9_-]|$)' "$log" && [ "$ncodes" = 1 ]; then
             echo "Témoin des sources OK : $(grep -c '^error\[' "$log") erreur(s) $codes sur storytold/filmcraft ; $(grep 'sources FAILED' "$log")"
           else
             cat "$log"
