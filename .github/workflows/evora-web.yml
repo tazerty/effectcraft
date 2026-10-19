@@ -346,11 +346,13 @@ jobs:
           echo "Moteur témoin : $(stat -c %s "$site/effectcraft_web_bg.wasm") octets (artefact : $(stat -c %s "$DIR/effectcraft_web_bg.wasm"))"
           echo "site=$site" >> "$GITHUB_OUTPUT"
 
-      # Relevé de diagnostic (EVORA-KIN-25), jamais un verdict : le périphérique graphique de la page
-      # du moteur était perdu dans toutes les passes de fumée (Q-15-3, run 38889819271). Quatre
-      # configurations du GPU logiciel du runner, chacune sur une passe d'une autre origine sans
-      # CSP, surveillée jusqu'à la perte du périphérique ou WATCH_MS : la configuration retenue
-      # passe ensuite aux passes du test de fumée. Ce pas imprime et ne peut pas échouer.
+      # Relevé de diagnostic (EVORA-KIN-25, matrice d'EVORA-KIN-27), jamais un verdict : le
+      # périphérique graphique de la page du moteur était perdu dans toutes les passes de fumée
+      # (Q-15-3, run 38889819271). Quatre configurations du GPU logiciel du runner, chacune sur une
+      # passe d'une autre origine sans CSP, surveillée jusqu'à la perte du périphérique ou WATCH_MS :
+      # les défauts de smoke.mjs (avec --disable-gpu-watchdog depuis EVORA-KIN-27), sans ce
+      # commutateur (la configuration d'avant), et les deux avec ?nogpuworkers (workers d'images
+      # sur leur processeur). Ce pas imprime et ne peut pas échouer.
       - name: GPU probe (diagnostic of the runner's software GPU, never a verdict)
         env:
           DIR: ${{ steps.pkg.outputs.dir }}
@@ -374,24 +376,24 @@ jobs:
             done
           done
           probe_pass() {
-            local name="$1" query="$2" add="$3"
+            local name="$1" query="$2" add="$3" drop="$4"
             cat > "$probe/parent/$name.html" <<HTML
           <!doctype html>
           <html><head><meta charset="utf-8"><title>Evora GPU probe</title><link rel="icon" href="data:,"></head>
           <body style="margin:0"><iframe id="engine" src="http://127.0.0.1:$QA/index.html?storage=memory&amp;nosw$query" style="border:0;width:1360px;height:860px" allow="fullscreen; clipboard-read; clipboard-write" sandbox="allow-scripts allow-same-origin"></iframe></body></html>
           HTML
             node $NODE_WS .github/evora/smoke.mjs --parent="http://127.0.0.1:$QB/$name.html" --engine="http://127.0.0.1:$QA" \
-              --label="probe-$name" --out="$probe" --watch="$WATCH_MS" --chrome-add="$add" > "$probe/$name.out" 2>&1
+              --label="probe-$name" --out="$probe" --watch="$WATCH_MS" --chrome-add="$add" --chrome-drop="$drop" > "$probe/$name.out" 2>&1
             local rc=$?
-            echo "::group::GPU probe $name (query « $query », switches « $add »), exit $rc"
+            echo "::group::GPU probe $name (query « $query », switches ajoutés « $add », retirés « $drop »), exit $rc"
             grep -E '^SMOKE(_[A-Z_]+)? ' "$probe/$name.out" | cut -c1-1500
             echo "::endgroup::"
             echo "PROBE $name exit=$rc : $(grep '^SMOKE_GPU ' "$probe/$name.out" | cut -c1-400)"
           }
-          probe_pass base "" ""
-          probe_pass watchdog "" "--disable-gpu-watchdog"
-          probe_pass cpu-workers "&amp;nogpuworkers" ""
-          probe_pass watchdog-cpu-workers "&amp;nogpuworkers" "--disable-gpu-watchdog"
+          probe_pass defauts "" "" ""
+          probe_pass sans-correctif "" "" "--disable-gpu-watchdog"
+          probe_pass defauts-cpu-workers "&amp;nogpuworkers" "" ""
+          probe_pass sans-correctif-cpu-workers "&amp;nogpuworkers" "" "--disable-gpu-watchdog"
           kill $(jobs -p) 2>/dev/null || true
           exit 0
 
