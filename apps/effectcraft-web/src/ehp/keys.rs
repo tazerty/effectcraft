@@ -51,8 +51,6 @@ const KEYS: &[Bind] = &[
     Bind { key: "viewer.nudge.down", keys: &["ArrowDown"] },
     Bind { key: "viewer.nudge.left", keys: &["ArrowLeft"] },
     Bind { key: "viewer.nudge.right", keys: &["ArrowRight"] },
-    // SABORDAGE QA (EVORA-KIN-48) S6 : une touche de caractere seule.
-    Bind { key: "layer.newText", keys: &["T"] },
 ];
 
 /// The profile's keys for binding key `key` (none when the profile doesn't bind it).

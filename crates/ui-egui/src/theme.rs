@@ -417,8 +417,7 @@ impl Tokens {
         let base = Tokens::for_kind(kind);
         let mut t = if kind.is_light() {
             Tokens {
-                // SABORDAGE QA (EVORA-KIN-48) S5 : fond clair de l'amont.
-                app_bg: c(0xb4, 0xb4, 0xb4),
+                app_bg: c(0xe4, 0xe4, 0xe7),
                 header_bg: c(0xf4, 0xf4, 0xf5),
                 panel_bg: c(0xf4, 0xf4, 0xf5),
                 tab_text: c(0x52, 0x52, 0x5b),
