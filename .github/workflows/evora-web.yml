@@ -45,8 +45,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Version du build de release amont du tag (job « Web (wasm) » de v0.11.1, run 39077528206 :
-  # rustc 1.99.1 (58cf8f9c3 2026-10-13)), réalignée à chaque montée (EVORA-KIN-30, D-19).
+  # Version du build de release amont du tag (job « Web (wasm) » de v0.17.0, run 40197985720 :
+  # rustc 1.99.1 (58cf8f9c3 2026-10-13), comme pour v0.11.1), réalignée à chaque montée
+  # (EVORA-KIN-30, EVORA-KIN-34, D-19).
   RUST_TOOLCHAIN: "1.99.1"
   WASM_BINDGEN_CLI: "0.2.129"
   CARGO_DENY_VERSION: "0.20.2"
