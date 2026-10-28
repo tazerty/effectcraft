@@ -11,7 +11,8 @@ a file it cannot read at all (an unreadable site is a broken package, not a meas
   dropped, so two builds compare by what they import, not by how the hash came out.
 - `net --dir DIR`: network and window primitives in the site's JavaScript and HTML (the
   precompressed copies and LICENSES/ are skipped): occurrences per file of `fetch(`, `WebSocket`,
-  `XMLHttpRequest`, `EventSource`, `sendBeacon`, `window.open`, `importScripts`.
+  `XMLHttpRequest`, `EventSource`, `sendBeacon`, `window.open`, `importScripts`, and since
+  EVORA-KIN-38 `RTCPeerConnection`, `WebTransport`, `new Worker(` and `import(` (dynamic import).
 
 Every line starts with `SURFACE` so the job log can be grepped.
 """
@@ -22,11 +23,14 @@ import re
 import sys
 
 KINDS = {0: "func", 1: "table", 2: "memory", 3: "global", 4: "tag"}
-PRIMITIVES = ("fetch(", "WebSocket", "XMLHttpRequest", "EventSource", "sendBeacon", "window.open", "importScripts")
+PRIMITIVES = (
+    "fetch(", "WebSocket", "XMLHttpRequest", "EventSource", "sendBeacon", "window.open", "importScripts",
+    "RTCPeerConnection", "WebTransport", "new Worker(", "import(",
+)
 SKIP_SUFFIXES = (".br", ".gz")
 
 
-def leb_u32(buf, pos):
+def leb_u32(buf, pos, max_bits=35):
     result = shift = 0
     while True:
         byte = buf[pos]
@@ -35,8 +39,19 @@ def leb_u32(buf, pos):
         if not byte & 0x80:
             return result, pos
         shift += 7
-        if shift > 35:
+        if shift > max_bits:
             raise ValueError("LEB128 trop long")
+
+
+def valtype_end(buf, pos):
+    # A value or reference type (EVORA-KIN-38): one byte, except the typed references of the
+    # function-references and GC proposals, `(ref null ht)` 0x63 and `(ref ht)` 0x64, followed by
+    # a heap type written as a signed LEB128 (s33).
+    t = buf[pos]
+    pos += 1
+    if t in (0x63, 0x64):
+        _, pos = leb_u32(buf, pos)
+    return pos
 
 
 def name_at(buf, pos):
@@ -45,11 +60,13 @@ def name_at(buf, pos):
 
 
 def limits_end(buf, pos):
+    # Flags: 0x01 maximum present, 0x02 shared, 0x04 64-bit indices (bounds as u64 LEB128).
     flags = buf[pos]
     pos += 1
-    _, pos = leb_u32(buf, pos)
+    bits = 70 if flags & 0x04 else 35
+    _, pos = leb_u32(buf, pos, bits)
     if flags & 0x01:
-        _, pos = leb_u32(buf, pos)
+        _, pos = leb_u32(buf, pos, bits)
     return pos
 
 
@@ -74,11 +91,11 @@ def wasm_imports(path):
                         p += 1
                     _, p = leb_u32(buf, p)
                 elif kind == 1:
-                    p = limits_end(buf, p + 1)
+                    p = limits_end(buf, valtype_end(buf, p))
                 elif kind == 2:
                     p = limits_end(buf, p)
                 elif kind == 3:
-                    p += 2
+                    p = valtype_end(buf, p) + 1
                 else:
                     raise ValueError(f"genre d'import inconnu {kind}")
                 out.append((module, field, KINDS.get(kind, str(kind))))
