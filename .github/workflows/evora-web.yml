@@ -492,6 +492,14 @@ jobs:
             --parent="$(ehp_parent "http://127.0.0.1:$PE" "host=evora&storage=memory&nosw&storageNs=$urlns" '{"disk.diskCacheEnabled": false}')" || rc=1
           node $NODE_WS .github/evora/smoke.mjs --engine="http://127.0.0.1:$PE" --label=pont-ehp-opfs --out="$smoke" --ehp=opfs --ehp-ns="$ns" --ehp-url-ns="$urlns" \
             --parent="$(ehp_parent "http://127.0.0.1:$PE" "host=evora&nosw&storageNs=$urlns" '{}')" || rc=1
+          # Raccourcis du membre au redémarrage de l'éditeur (correction 1 du lot KIN-FK-B2) : deux passes
+          # du banc avec le stockage du navigateur, sur un même profil de Chrome ; la première enregistre
+          # les touches du membre, la seconde les retrouve après le redémarrage.
+          keysprof="$(mktemp -d)"
+          for leg in 1 2; do
+            node $NODE_WS .github/evora/smoke.mjs --engine="http://127.0.0.1:$PE" --label="pont-ehp-recharge-$leg" --out="$smoke" --ehp=opfs --ehp-ns="$ns" --ehp-url-ns="$urlns" \
+              --ehp-leg="keys-$leg" --profile="$keysprof" --parent="$(ehp_parent "http://127.0.0.1:$PE" "host=evora&nosw&storageNs=$urlns" '{}')" || rc=1
+          done
           # Témoins du banc « pont-ehp » (EVORA-KIN-20) : chacun doit rougir exactement sur les constats
           # de son sabordage (--witness-require), et sur rien d'autre que leurs conséquences déclarées
           # (--witness-tolerate) ; smoke.mjs le juge (SMOKE_WITNESS ok=true) et sa ligne SMOKE reste ok=false.

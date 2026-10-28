@@ -16,7 +16,7 @@
 //   node smoke.mjs --parent=http://127.0.0.1:8602/parent.html --engine=http://127.0.0.1:8601 \
 //     --label=plain --out=/tmp/smoke [--chrome=google-chrome] [--timeout=240000] [--terms=block]
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -45,6 +45,11 @@ const expectLang = opt["expect-lang"] || "";
 const ehpMode = opt.ehp || "";
 const ehpNs = opt["ehp-ns"] || "";
 const ehpUrlNs = opt["ehp-url-ns"] || "";
+// `--ehp-leg=keys-1|keys-2` (correction 1 of lot KIN-FK-B2): the member's keyboard shortcuts
+// across a restart of the editor ([ehp-keys-reload], [ehp-keys-active], [ehp-keys-pin],
+// [ehp-keys-upstream], [ehp-keys-reset]): two passes of the « pont-ehp » bench in its browser
+// storage mode, on one Chrome profile (`--profile`), each ending after the document is open.
+const ehpLeg = ["keys-1", "keys-2"].includes(opt["ehp-leg"]) ? opt["ehp-leg"] : "";
 // `--expect-theme=light` (patch E2): the engine was framed with `?theme=light`.
 const expectTheme = opt["expect-theme"] || "";
 // `--witness-require=A|B` and `--witness-tolerate=C|D` (EVORA-KIN-20): a witness pass, against a
@@ -84,7 +89,14 @@ const contexts = new Map();
 const sessions = new Map();
 const report = { label, parentUrl, engineOrigin, ok: false };
 
-const profile = mkdtempSync(join(tmpdir(), "evora-chrome-"));
+// `--profile=DIR` (correction 1 of lot KIN-FK-B2): Chrome's profile, kept for a later pass (the
+// second leg of `--ehp-leg`); a fresh one otherwise.
+const profile = opt.profile || mkdtempSync(join(tmpdir(), "evora-chrome-"));
+if (opt.profile) {
+  mkdirSync(profile, { recursive: true });
+  // The lock files a killed browser leaves must not make the next one refuse the profile.
+  for (const f of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) rmSync(join(profile, f), { force: true });
+}
 const DEFAULT_FLAGS = [
   "--headless=new",
   "--remote-debugging-port=0",
@@ -380,7 +392,7 @@ const EHP_KNOWN = new Set([
 const EHP_OUTBOUND = new Set(["evora:ready", "evora:failed", "evora:ack", "evora:dirty", "evora:save", "evora:export", "evora:pick", "evora:need", "evora:focus-out", "evora:commands"]);
 // command.catalog (Evora's rules of 2026-10-27 on command bridges, AVENANT §4 and §5): the catalog's
 // white list (src/ehp/commands.rs), what it must hold, the removal markers of its ids and labels
-// (fr, then de after evora:lang) and the exceptions, each justified (none today).
+// (fr, then de after evora:lang) and the exceptions, each justified one by one (CAT_EXCEPTIONS).
 const CAT_FILE_ADMITTED = ["file.import", "file.importMultiple", "file.importSolid", "file.importPlaceholder", "file.importLottie", "file.newCompFromSelection", "file.exportLottie", "file.exportTimeline"];
 const CAT_OFF = ["edit.editOriginal", "templates.saveAs", "anim.browsePresets"];
 const CAT_PREMISE = ["file.import", "edit.undo", "edit.clear", "layer.newText", "project.newFolder", "layer.setBlendMode.mode-Multiply", "edit.purge.what-memory"];
@@ -446,6 +458,10 @@ const THEME_PAIRS = [
   ["keyframe", "tlBg", 3], ["cti", "tlBg", 3], ["keyframeSelected", "tlBg", 3], ["focus", "panelBg", 3],
 ];
 const THEME_SURFACES = { light: { appBg: "#e4e4e7", panelBg: "#f4f4f5", fieldBg: "#ffffff", pasteboard: "#d4d4d4" }, dark: { appBg: "#09090b", panelBg: "#18181b", fieldBg: "#09090b", pasteboard: "#262626" } };
+// The member's keys of `--ehp-leg` (correction 1 of lot KIN-FK-B2): an alias (a single key, the
+// member's to add) on a command the profile leaves free, upstream's own keys recorded on another
+// (the engine drops an override equal to them), and a copy of the profile with a key of its own.
+const KEYS_LEG = { copy: "Evora banc", alias: { command: "timeline.reveal.rotation", keys: ["Q"] }, own: { command: "timeline.reveal.opacity", keys: ["Alt+O"] }, upstream: "timeline.reveal.position" };
 // Menu commands the engine hides in the bridge (src/ehp.rs HIDDEN_COMMANDS: a sample) and others it
 // keeps (the premise: the list is the engine's own).
 const EHP_HIDDEN = ["file.newProject", "file.openDemoProject", "file.revealInFinder", "file.watchFolder", "effect.plugins.load", "help.github"];
@@ -691,6 +707,109 @@ async function runEhp(ectx, parentOrigin) {
   check(frLabels.includes("Enregistrer"), "[ehp] langue d'evora:init (fr) absente des menus (« Enregistrer »)");
   check(/^light/i.test(theme1), `[ehp] thème d'evora:init (clair) absent : ${theme1}`);
   await diag(ectx, "init");
+
+  // 4b. The member's keyboard shortcuts across a restart of the editor (`--ehp-leg`, correction 1
+  //     of lot KIN-FK-B2): the two legs share one browser profile and end here. The first records
+  //     the member's keys: an alias in the « Kinetika » profile, upstream's own keys on a command the
+  //     profile leaves free (the engine drops that override: the bridge writes it out), then a copy
+  //     of the profile, made active, with a key of its own; they reach browser storage. The second
+  //     starts the editor again and finds them, and the copy still active; then upstream's keys
+  //     never come back (the copy reset, upstream's preset made active) and Reset Preset, clicked in
+  //     the shortcut editor, empties the profile of the member's keys.
+  if (ehpLeg) {
+    const L = KEYS_LEG;
+    const leg = (r.keysLeg = { leg: ehpLeg });
+    const same = (a, b) => JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
+    const tryExec = (command, params) => exec(command, params).catch((e) => ({ rejected: String((e && e.message) || e) }));
+    // Passes of the engine: the bridge settles the presets at the end of the frame that changed them.
+    const passes = async () => {
+      for (let i = 0; i < 3; i++) await request("ui.inspect").catch(() => null);
+    };
+    const overrides = async (preset) => {
+      const d = await tryExec("shortcuts.export", { preset });
+      return d && d.overrides ? d.overrides : null;
+    };
+    const pick = (o) => o && { alias: o[L.alias.command], own: o[L.own.command], upstream: o[L.upstream], save: o["file.save"] };
+    const list = await tryExec("shortcuts.list", {});
+    const rows = list && Array.isArray(list.commands) ? list.commands : [];
+    const row = (key) => rows.find((x) => x.key === key) || null;
+    const up = row(L.upstream);
+    const upDefaults = up && Array.isArray(up.defaults) ? up.defaults : [];
+    Object.assign(leg, { preset: list && list.preset, presets: list && list.presets, upstreamDefaults: upDefaults });
+    if (ehpLeg === "keys-1") {
+      // Premises: the profile active, the three commands bindable, upstream's keys on the free
+      // command, which the profile leaves without a key.
+      check(
+        !!list && list.preset === "Kinetika" && !!row(L.alias.command) && !!row(L.own.command) && !!up && upDefaults.length > 0 && (up.keys || []).length === 0,
+        `[ehp-keys-reload] prémisse : profil ou commandes du banc absents : ${JSON.stringify({ preset: list && list.preset, alias: row(L.alias.command), own: row(L.own.command), up })}`,
+      );
+      leg.setAlias = await tryExec("shortcuts.set", { command: L.alias.command, keys: L.alias.keys });
+      leg.setUpstream = await tryExec("shortcuts.set", { command: L.upstream, keys: upDefaults });
+      await passes();
+      leg.kinetika = pick(await overrides("Kinetika"));
+      check(!!leg.kinetika && same(leg.kinetika.alias, L.alias.keys), `[ehp-keys-reload] touche du membre absente du profil : ${JSON.stringify(leg)}`);
+      check(!!leg.kinetika && same(leg.kinetika.upstream, upDefaults), `[ehp-keys-pin] touches de l'amont enregistrées par le membre laissées implicites dans le profil : ${JSON.stringify(leg.kinetika)}`);
+      leg.duplicate = await tryExec("shortcuts.preset", { op: "duplicate", from: "Kinetika", name: L.copy });
+      leg.setOwn = await tryExec("shortcuts.set", { command: L.own.command, keys: L.own.keys });
+      await passes();
+      leg.flushed = await evalIn(ectx, "window.effectcraft.flush().then(() => true, (e) => String((e && e.message) || e))", true, 60000).catch((e) => String(e));
+      const stored = await evalIn(ectx, "window.effectcraft.listStored().then((v) => JSON.parse(JSON.stringify(v)))", true, 60000).catch(() => null);
+      leg.stored = stored && { config: stored.config, pending: stored.pending };
+      check(
+        leg.flushed === true && !!stored && Array.isArray(stored.config) && stored.config.includes("shortcuts.json") && stored.pending === false,
+        `[ehp-keys-reload] prémisse : raccourcis non écrits dans le stockage du navigateur : ${JSON.stringify({ flushed: leg.flushed, stored: leg.stored, duplicate: leg.duplicate, setOwn: leg.setOwn })}`,
+      );
+    } else {
+      check(
+        !!list && list.preset === L.copy && Array.isArray(list.presets) && list.presets.includes("Kinetika") && list.presets.includes(L.copy),
+        `[ehp-keys-active] préréglage du membre non retrouvé actif au redémarrage : ${JSON.stringify({ preset: list && list.preset, presets: list && list.presets })}`,
+      );
+      leg.kinetika = pick(await overrides("Kinetika"));
+      leg.copy = pick(await overrides(L.copy));
+      check(
+        !!leg.kinetika && same(leg.kinetika.alias, L.alias.keys) && same(leg.kinetika.save, ["Cmd+S"]) && !!leg.copy && same(leg.copy.own, L.own.keys) && same(leg.copy.alias, L.alias.keys),
+        `[ehp-keys-reload] touches du membre perdues au redémarrage : ${JSON.stringify({ kinetika: leg.kinetika, copy: leg.copy })}`,
+      );
+      check(upDefaults.length > 0 && !!leg.copy && same(leg.copy.upstream, upDefaults), `[ehp-keys-pin] touches de l'amont enregistrées par le membre perdues au redémarrage : ${JSON.stringify({ copy: leg.copy, upDefaults })}`);
+      // Upstream's keys never come back: the copy reset gets the profile's keys, and upstream's
+      // preset, made active, gives way to the profile.
+      leg.selectCopy = await tryExec("shortcuts.preset", { op: "select", name: L.copy });
+      leg.reset = await tryExec("shortcuts.reset", {});
+      await passes();
+      leg.copyReset = pick(await overrides(L.copy));
+      check(
+        !!leg.copyReset && same(leg.copyReset.save, ["Cmd+S"]) && same(leg.copyReset.upstream, []) && same(leg.copyReset.own, []) && same(leg.copyReset.alias, []),
+        `[ehp-keys-upstream] préréglage réinitialisé sans les touches du profil : ${JSON.stringify(leg.copyReset)}`,
+      );
+      leg.selectUpstream = await tryExec("shortcuts.preset", { op: "select", name: "EffectCraft Default" });
+      await passes();
+      const after = await tryExec("shortcuts.list", { assigned: true });
+      leg.afterUpstream = after && after.preset;
+      check(!!after && after.preset === "Kinetika", `[ehp-keys-upstream] préréglage de l'amont laissé actif sous l'hôte : ${JSON.stringify(leg.afterUpstream)}`);
+      // Reset Preset in the shortcut editor, on the profile itself: a click on the editor's button.
+      leg.selectProfile = await tryExec("shortcuts.preset", { op: "select", name: "Kinetika" });
+      leg.setAgain = await tryExec("shortcuts.set", { command: L.alias.command, keys: L.alias.keys });
+      await passes();
+      const before = pick(await overrides("Kinetika"));
+      leg.dialog = await requestWith("ui.menu.invoke", { command: "app.keyboardShortcuts" });
+      await passes();
+      leg.click = await requestWith("ui.click", { id: "shortcuts.resetPreset" });
+      await passes();
+      const reset = pick(await overrides("Kinetika"));
+      leg.profileReset = { before, after: reset };
+      check(!!before && same(before.alias, L.alias.keys) && !(leg.click && leg.click.rejected), `[ehp-keys-reset] prémisse : alias du membre ou clic absents : ${JSON.stringify(leg.profileReset)} ${JSON.stringify(leg.click)}`);
+      const emptied = !!reset && !same(reset.alias, L.alias.keys);
+      check(emptied, `[ehp-keys-reset] « Reset Preset » sans effet sur le profil de l'hôte : ${JSON.stringify(leg.profileReset)}`);
+      if (emptied) check(same(reset.alias, []) && same(reset.save, ["Cmd+S"]) && same(reset.upstream, []), `[ehp-keys-upstream] profil réinitialisé sans ses touches : ${JSON.stringify(reset)}`);
+      if (pageSession) {
+        const shot = await send("Page.captureScreenshot", { format: "png" }, pageSession).catch(() => null);
+        if (shot) writeFileSync(join(out, `smoke-${label}-raccourcis.png`), Buffer.from(shot.data, "base64"));
+      }
+    }
+    note("keys leg", leg);
+    console.log(`SMOKE_KEYS ${label} ${JSON.stringify(leg).slice(0, 3000)}`);
+    return;
+  }
 
   // 5. No answer to a window that isn't the parent, to an origin not admitted, to version 2; the
   //    parent's own request (the witness) is answered.
