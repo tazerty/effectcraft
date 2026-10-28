@@ -1244,7 +1244,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         if let Some(spec) = effectcraft_engine::effects::find(effect) {
             let lines = vec![
-                crate::i18n::effects::name(spec.id, spec.name),
+                // Evora (E9): the effect's name as shown goes through the display-name overrides.
+                crate::i18n::neutral_owned(crate::i18n::effects::name(spec.id, spec.name)),
                 format!("Category: {}", crate::i18n::effects::category(spec.category)),
                 "EffectCraft built-in effect (MIT OR Apache-2.0)".to_string(),
             ];
@@ -1646,7 +1647,7 @@ pub fn viewer_hook(
                     let Some(resp) = resp else { continue };
                     if resp.hovered() {
                         ctx.set_cursor_icon(egui::CursorIcon::Move);
-                        resp.clone().on_hover_text(format!("{}: {}", crate::i18n::effects::group(&g.match_id, &g.name), pr.name));
+                        resp.clone().on_hover_text(format!("{}: {}", crate::i18n::neutral_owned(crate::i18n::effects::group(&g.match_id, &g.name)), pr.name));
                     }
                     if resp.dragged()
                         && let Some(pos) = resp.interact_pointer_pos()
