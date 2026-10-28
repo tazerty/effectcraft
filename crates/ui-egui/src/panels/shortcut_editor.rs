@@ -237,8 +237,10 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
 
     let table = app.session.shortcuts().clone();
     // Evora (KIN-FK-B2, Q-K19 (a)): under a host profile ([`crate::menus::host_keymap_name`]),
-    // upstream's built-in preset isn't offered, and the host's profile is neither renamed, deleted
-    // nor reset (its keys can still be changed, or the profile duplicated).
+    // upstream's built-in preset isn't offered, and the host's profile is neither renamed nor
+    // deleted (its keys can still be changed, or the profile duplicated); Reset Preset brings back
+    // the profile's keys, for the host's profile as for its copies (the host bridge refills an
+    // emptied preset with them, never with upstream's).
     let host_profile = crate::menus::host_keymap_name();
     let presets: Vec<String> = app.session.keymaps.names().into_iter().filter(|n| host_profile.is_none() || n != DEFAULT_PRESET).collect();
     let active = app.session.keymaps.active.clone();
@@ -271,6 +273,9 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             });
             app.auto.add("shortcuts.preset", r.response.rect, "Preset");
             let custom = active != DEFAULT_PRESET && host_profile != Some(active.as_str());
+            // Evora (KIN-FK-B2, correction 1): every preset but upstream's can be reset (off the
+            // host: the same presets as `custom`).
+            let resettable = active != DEFAULT_PRESET;
             let b = ui.button(tr("Duplicate"));
             app.auto.add("shortcuts.duplicate", b.rect, "Duplicate");
             if b.clicked() {
@@ -296,7 +301,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             if b.clicked() {
                 st.confirm_delete = Some(active.clone());
             }
-            let b = ui.add_enabled(custom, egui::Button::new(tr("Reset Preset")));
+            let b = ui.add_enabled(resettable, egui::Button::new(tr("Reset Preset")));
             app.auto.add("shortcuts.resetPreset", b.rect, "Reset Preset");
             if b.clicked() {
                 run.push(("shortcuts.reset".into(), json!({})));

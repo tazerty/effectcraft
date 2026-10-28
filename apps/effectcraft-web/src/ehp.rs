@@ -444,6 +444,9 @@ pub fn failed(error: &JsValue) {
 pub fn dirty(session: &mut effectcraft_engine::Session) {
     output::hold(session);
     media::track_selection(session);
+    // Evora (KIN-FK-B2, correction 1): the member's keyboard shortcuts written out as they left
+    // them, upstream's keys kept out (nothing when the presets didn't change).
+    keys::keep(session);
     let now = session.is_dirty();
     let Some(state) = bridge() else { return };
     let Ok(mut st) = state.try_borrow_mut() else { return };
@@ -502,7 +505,8 @@ pub fn install_host_hooks(app: &mut EffectcraftApp) {
     app.hooks.pick_folder = None;
     app.hooks.file_dialog_async = Some(Box::new(dialog));
     effectcraft_ui_egui::menus::hide_commands(HIDDEN_COMMANDS);
-    // Evora (KIN-FK-B2): the « Kinetika » keyboard shortcut profile, active.
+    // Evora (KIN-FK-B2): the « Kinetika » keyboard shortcut profile, installed on the first start;
+    // afterwards the member's presets are kept as they leave them (`keys::keep`).
     keys::install(&mut app.session);
 }
 

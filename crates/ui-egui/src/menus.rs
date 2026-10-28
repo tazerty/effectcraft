@@ -29,11 +29,12 @@ pub fn is_hidden(id: &str) -> bool {
     HIDDEN.get().is_some_and(|h| h.iter().any(|x| x == id))
 }
 
-/// Evora (KIN-FK-B2, Q-K19 (a)): the keyboard shortcut preset the host installs and keeps active
-/// (Evora's "Kinetika" profile, no single-key shortcut by default). While it is set, the
-/// keyboard shortcut editor doesn't offer upstream's built-in preset, and doesn't delete, rename
-/// or reset the host's profile (a member's own keys go in it, or in a duplicate). Set once by the
-/// host at start; `None` otherwise.
+/// Evora (KIN-FK-B2, Q-K19 (a)): the keyboard shortcut preset the host installs and makes active on
+/// the first start (Evora's "Kinetika" profile, no single-key shortcut by default). While it is set, the
+/// keyboard shortcut editor doesn't offer upstream's built-in preset, and doesn't delete or rename
+/// the host's profile (a member's own keys go in it, or in a duplicate; Reset Preset brings back
+/// the profile's keys, which the host refills an emptied preset with). Set once by the host at
+/// start; `None` otherwise.
 static HOST_KEYMAP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Evora (KIN-FK-B2): the host's keyboard shortcut preset (see [`HOST_KEYMAP`]); only the first
