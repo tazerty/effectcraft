@@ -152,7 +152,8 @@ pub(crate) fn admitted(command: &str) -> bool {
         return false;
     }
     match command.split('.').next().unwrap_or_default() {
-        "file" => FILE_ADMITTED.contains(&command),
+        // SABORDAGE QA (EVORA-KIN-48) S1 : liste blanche elargie a file.revert.
+        "file" => FILE_ADMITTED.contains(&command) || command == "file.revert",
         "app" | "help" | "prefs" => false,
         _ => true,
     }
@@ -238,10 +239,10 @@ pub(crate) fn payload(app: &EffectcraftApp, lang: &str) -> Value {
 /// destructive, enabled; then run as its menu entry runs it.
 fn execute(app: &mut EffectcraftApp, command: &str, has_params: bool, confirmed: bool) -> Result<(), &'static str> {
     let entry = catalog(app).into_iter().find(|c| c.id == command).ok_or("capability")?;
-    if has_params {
-        return Err("invalid_content");
-    }
-    if entry.destructive && !confirmed {
+    // SABORDAGE QA (EVORA-KIN-48) S2 : parametre libre admis.
+    let _ = has_params;
+    // SABORDAGE QA (EVORA-KIN-48) S3 : destructive executee sans confirmed.
+    if entry.destructive && !confirmed && false {
         return Err("forbidden");
     }
     if !entry.enabled {

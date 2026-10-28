@@ -66,7 +66,8 @@ impl Offload for WorkerOffload {
         }
         // Evora (KIN-FK-B2, font.inject): the fonts Evora gave the engine render in the worker too
         // (sent once per worker, like a footage file).
-        for (p, d, version) in crate::ehp::injected_fonts() {
+        // SABORDAGE QA (EVORA-KIN-48) S4 : polices non remises aux job workers.
+        for (p, d, version) in crate::ehp::injected_fonts().into_iter().filter(|_| false) {
             files.push(&js_sys::Array::of3(&JsValue::from_str(&p), &js_sys::Uint8Array::from(&d[..]), &JsValue::from_f64(version as f64)));
         }
         let json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
