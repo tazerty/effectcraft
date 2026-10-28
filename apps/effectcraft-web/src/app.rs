@@ -253,8 +253,8 @@ pub fn session() -> Session {
 /// Evora (E3): an Evora interface language (`?lang=`, one of the platform's 14 codes) as the
 /// engine's catalog code. `zh-Hans` (also `zh-cn`, `zh`) → `zh-hans`; fr, de, es, ru, ja and en
 /// keep their code; ar, hi, id, it, ko and tr, which the engine has no catalog for, → `en` (the
-/// Evora shell shows its banner). `pt` → none: the variant (Brazilian or not) awaits decision
-/// D-23, so the engine keeps its default. Anything else → none. The host bridge (E4) maps
+/// Evora shell shows its banner). `pt` (Evora's Portuguese is Brazilian, campaign decision of
+/// 2026-10-27) and `pt-br` → `pt-br`. Anything else → none. The host bridge (E4) maps
 /// `evora:init` and `evora:lang`'s `engineLang` through it too.
 pub(crate) fn evora_language(code: &str) -> Option<&'static str> {
     match code.trim().to_ascii_lowercase().as_str() {
@@ -265,6 +265,7 @@ pub(crate) fn evora_language(code: &str) -> Option<&'static str> {
         "ru" => Some("ru"),
         "ja" => Some("ja"),
         "zh-hans" | "zh-cn" | "zh" => Some("zh-hans"),
+        "pt" | "pt-br" => Some("pt-br"),
         "ar" | "hi" | "id" | "it" | "ko" | "tr" => Some("en"),
         _ => None,
     }
