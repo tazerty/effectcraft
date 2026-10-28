@@ -356,7 +356,8 @@ pub async fn prepare_storage(ns: String, persistent: bool, purge: bool) {
     }
     // Evora (KIN-02): the disk cache is off in the bridge, whatever the setting: this account's
     // cache folder goes too (every kind: frames, layers, mattes), before any worker could write.
-    match JsFuture::from(storage_purge("cache", false)).await {
+    // SABORDAGE QA (EVORA-KIN-44) S7 : le cache disque du compte reste.
+    match JsFuture::from(storage_purge(if purge { "none" } else { "cache" }, false)).await {
         Ok(r) => {
             let left = remaining(&r);
             if left > 0 {
@@ -458,7 +459,9 @@ pub fn install_host_hooks(app: &mut EffectcraftApp) {
     app.hooks.pick_open_project = Some(Box::new(pick_open_project));
     app.hooks.pick_folder = None;
     app.hooks.file_dialog_async = Some(Box::new(dialog));
-    effectcraft_ui_egui::menus::hide_commands(HIDDEN_COMMANDS);
+    // SABORDAGE QA (EVORA-KIN-44) S6 : aucune entree masquee.
+    effectcraft_ui_egui::menus::hide_commands(&[]);
+    let _ = HIDDEN_COMMANDS;
 }
 
 /// A save dialog named `path` for a file that isn't a project (`media::dialog`): written, it goes

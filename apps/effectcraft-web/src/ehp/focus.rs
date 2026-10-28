@@ -22,6 +22,10 @@ const EXIT_KEY: &str = "F6";
 
 /// Listen for the exit key on the engine's window, in the capture phase (from `super::boot`).
 pub(super) fn listen() {
+    // SABORDAGE QA (EVORA-KIN-44) S3 : la touche de sortie n'est pas ecoutee.
+    if EXIT_KEY == "F6" {
+        return;
+    }
     let Some(window) = web_sys::window() else { return };
     let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
         let ev: &JsValue = e.as_ref();
