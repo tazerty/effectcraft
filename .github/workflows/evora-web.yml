@@ -401,6 +401,16 @@ jobs:
           # une autre origine), page d'amorçage du banc sur l'origine du moteur. L'artefact n'est pas
           # modifié : le serveur du banc sert ces chemins à la place des siens.
           cp .github/evora/ehp-parent.html .github/evora/ehp-rogue.html "$smoke/parent/"
+          # font.inject (lot KIN-FK-B2) : une police TrueType du runner, servie par le parent du banc
+          # sous /evora-font.ttf, que la coquille du banc remet au moteur (evora:font).
+          font=""
+          for f in /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf; do
+            if [ -s "$f" ]; then font="$f"; break; fi
+          done
+          [ -n "$font" ] || font="$(find /usr/share/fonts -type f -name '*.ttf' 2>/dev/null | LC_ALL=C sort | head -n 1 || true)"
+          [ -n "$font" ] || { echo "::error::aucune police TrueType sur le runner pour le banc font.inject"; exit 1; }
+          cp "$font" "$smoke/parent/evora-font.ttf"
+          echo "Police du banc font.inject : $font ($(stat -c %s "$font") octets)"
           printf '{"parentOrigins": ["http://127.0.0.1:%s"]}\n' "$PB" > "$smoke/host-admit.json"
           printf '{"parentOrigins": ["http://127.0.0.1:1"]}\n' > "$smoke/host-other.json"
           seedmap="--map /evora-seed.html=.github/evora/ehp-seed.html --map /evora-seed.js=.github/evora/ehp-seed.js"
@@ -558,7 +568,12 @@ jobs:
             find "$NAME" -type f | LC_ALL=C sort | zip -q -X -9 -n .br:.gz:.png "$OUT/$NAME.zip" -@
           )
           cp "$DIR/csp-hashes.txt" "$OUT/csp-hashes.txt"
-          (cd "$OUT" && sha256sum "$NAME.zip" csp-hashes.txt > SHA256SUMS)
+          # Catalogue des commandes (command.catalog, lot KIN-FK-B2, DT-S17) : le premier evora:commands
+          # reçu par le banc pont-ehp (en français), copié dans engines.json par le provisionnement d'Evora.
+          [ -s "$RUNNER_TEMP/evora-smoke/commands.json" ] || { echo "::error::commands.json absent du banc pont-ehp"; exit 1; }
+          cp "$RUNNER_TEMP/evora-smoke/commands.json" "$OUT/commands.json"
+          python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); assert c["app"] == "kinetika" and c["count"] == len(c["commands"]) > 0, c.get("count"); print("commands.json", c["lang"], c["count"], c["hash"])' "$OUT/commands.json"
+          (cd "$OUT" && sha256sum "$NAME.zip" csp-hashes.txt commands.json > SHA256SUMS)
           cat "$OUT/SHA256SUMS"
           ls -l "$OUT"
           {
@@ -585,6 +600,7 @@ jobs:
             ${{ steps.pkg.outputs.out }}/${{ steps.meta.outputs.name }}.zip
             ${{ steps.pkg.outputs.out }}/SHA256SUMS
             ${{ steps.pkg.outputs.out }}/csp-hashes.txt
+            ${{ steps.pkg.outputs.out }}/commands.json
           if-no-files-found: error
           compression-level: 0
 

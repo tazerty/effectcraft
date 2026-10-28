@@ -247,6 +247,8 @@ const defaultCtx = (origin) => [...contexts.values()].find((c) => c.origin === o
 // its origin).
 let mainFrameId = null;
 let navigatedAt = 0;
+// The page's CDP session (lot KIN-FK-B2: a capture of the dark E2-KIN palette mid-pass).
+let pageSession = null;
 const parentCtx = (origin) => [...contexts.values()].find((c) => c.origin === origin && c.isDefault && (!mainFrameId || c.frameId === mainFrameId));
 
 function check(cond, msg) {
@@ -364,15 +366,86 @@ async function judgeScreen(ctx) {
 // Since the V1 bridge (lot KIN-FK-B1): doc.saved-ack, export.drive, pick.drive, media.need and
 // ui.focus-out, each with its checks below ([ehp-sack], [ehp-export], [ehp-pick], [ehp-need],
 // [ehp-focus]; [ehp-menus] and [ehp-cache] for the host mode of KIN-01 and KIN-02).
+// Since lot KIN-FK-B2: command and command.catalog ([ehp-commands], [ehp-command], [ehp-command-scope],
+// [ehp-command-params], [ehp-command-destructive]) and font.inject ([ehp-font], [ehp-font-worker]);
+// the E2-KIN palette ([ehp-theme]) and the « Kinetika » keyboard profile ([ehp-keys]).
 const EHP_CAPABILITIES = [
   "doc.open", "doc.save", "doc.saved-ack", "doc.dirty", "doc.request-save", "export.drive", "pick.drive", "media.need",
-  "storage.ns", "storage.purge", "live.lang", "live.theme", "ui.focus-out",
+  "storage.ns", "storage.purge", "live.lang", "live.theme", "ui.focus-out", "command", "command.catalog", "font.inject",
 ];
 const EHP_EXPECTED = ehpMode === "memory" ? [...EHP_CAPABILITIES, "storage.memory"] : EHP_CAPABILITIES;
 const EHP_KNOWN = new Set([
   ...EHP_CAPABILITIES, "storage.memory", "doc.multi", "media.ranges", "command", "font.inject", "author", "ui.activity", "drop.files", "prefs.sync", "command.catalog",
 ]);
-const EHP_OUTBOUND = new Set(["evora:ready", "evora:failed", "evora:ack", "evora:dirty", "evora:save", "evora:export", "evora:pick", "evora:need", "evora:focus-out"]);
+const EHP_OUTBOUND = new Set(["evora:ready", "evora:failed", "evora:ack", "evora:dirty", "evora:save", "evora:export", "evora:pick", "evora:need", "evora:focus-out", "evora:commands"]);
+// command.catalog (Evora's rules of 2026-10-27 on command bridges, AVENANT §4 and §5): the catalog's
+// white list (src/ehp/commands.rs), what it must hold, the removal markers of its ids and labels
+// (fr, then de after evora:lang) and the exceptions, each justified (none today).
+const CAT_FILE_ADMITTED = ["file.import", "file.importMultiple", "file.importSolid", "file.importPlaceholder", "file.importLottie", "file.newCompFromSelection", "file.exportLottie", "file.exportTimeline"];
+const CAT_OFF = ["edit.editOriginal", "templates.saveAs", "anim.browsePresets"];
+const CAT_PREMISE = ["file.import", "edit.undo", "edit.clear", "layer.newText", "project.newFolder", "layer.setBlendMode.mode-Multiply", "edit.purge.what-memory"];
+const CAT_DESTRUCTIVE_PREMISE = ["edit.clear", "edit.cut", "edit.purge.what-memory", "layer.mask.removeAll"];
+const CAT_MARK_ID = new Set(["delete", "remove", "cut", "clear", "flatten", "reset", "discard", "erase", "purge"]);
+const CAT_MARK_LABEL = new Set([...CAT_MARK_ID, "supprimer", "effacer", "couper", "retirer", "réinitialiser", "vider", "purger", "aplatir", "löschen", "entfernen", "ausschneiden", "zurücksetzen", "leeren"]);
+// Two effects of the Effect menu are named after what they remove from the picture: applying one
+// adds an effect to the selected layer (Edit ▸ Undo takes it away), nothing of the member's goes.
+const CAT_EXCEPTIONS = {
+  "effect.apply.effect-ec.noise.removegrain": "applies the Remove Grain effect: adds an effect, removes nothing",
+  "effect.apply.effect-ec.channel.removecolormatting": "applies the Remove Color Matting effect: adds an effect, removes nothing",
+};
+const CAT_BRAND = /effectcraft|artcraft|lumetri|premiere|adobe|cycore/i;
+const CAT_ID = /^[a-z][A-Za-z0-9_.-]*$/;
+// The words of an id (dots, dashes and camelCase split) and of a label (letters only).
+const idWords = (id) => (String(id).match(/[A-Z]?[a-z]+|[A-Z]+(?![a-z])/g) || []).map((w) => w.toLowerCase());
+const labelWords = (l) => String(l).toLowerCase().split(/[^\p{L}]+/u).filter(Boolean);
+// The catalog's hash recomputed (FNV-1a 64 of each id, \0, 1 or 0, \n).
+const catalogHash = (cmds) => {
+  const P = 0x100000001b3n;
+  const M = (1n << 64n) - 1n;
+  let h = 0xcbf29ce484222325n;
+  const feed = (bytes) => {
+    for (const b of bytes) h = ((h ^ BigInt(b)) * P) & M;
+  };
+  for (const c of cmds) {
+    feed(new TextEncoder().encode(String(c.id)));
+    feed([0, c.destructive ? 0x31 : 0x30, 0x0a]);
+  }
+  return h.toString(16).padStart(16, "0");
+};
+// ui.focus-out (the bridge's F6) never bound; keys that type no character may stand alone.
+const KEY_FREE = /^(Delete|Backspace|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Escape|Enter|Tab|Home|End|PageUp|PageDown|F[0-9]{1,2})$/;
+// A shortcut of a single character key: a letter, digit, punctuation, symbol, Space or keypad key
+// without Ctrl, Cmd or Alt (Shift alone still types a character; WCAG 2.1.4).
+const singleKey = (k) => {
+  const s = String(k).replace(/^Physical\+/, "");
+  let key;
+  let mods;
+  if (s.endsWith("++")) {
+    key = "+";
+    mods = s.slice(0, -2).split("+").filter(Boolean);
+  } else {
+    const parts = s.split("+");
+    key = parts.pop();
+    mods = parts;
+  }
+  return !mods.some((m) => m === "Ctrl" || m === "Cmd" || m === "Alt") && !KEY_FREE.test(key);
+};
+// E2-KIN (apps/kinetika/CONCEPTION-PRO.md §8.3 in Evora): WCAG contrast of the palette's pairs.
+const luminance = (hex) => {
+  const v = [1, 3, 5].map((i) => parseInt(String(hex).slice(i, i + 2), 16) / 255).map((x) => (x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+};
+const contrast = (a, b) => {
+  const x = luminance(a);
+  const y = luminance(b);
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+};
+const THEME_PAIRS = [
+  ["text", "panelBg", 4.5], ["textDim", "panelBg", 4.5], ["textFaint", "panelBg", 4.5], ["textFaint", "rowAlt", 4.5],
+  ["hotText", "panelBg", 4.5], ["timecode", "panelBg", 4.5], ["text", "rowSelected", 4.5], ["fieldBorder", "fieldBg", 3],
+  ["keyframe", "tlBg", 3], ["cti", "tlBg", 3], ["keyframeSelected", "tlBg", 3], ["focus", "panelBg", 3],
+];
+const THEME_SURFACES = { light: { appBg: "#e4e4e7", panelBg: "#f4f4f5", fieldBg: "#ffffff", pasteboard: "#d4d4d4" }, dark: { appBg: "#09090b", panelBg: "#18181b", fieldBg: "#09090b", pasteboard: "#262626" } };
 // Menu commands the engine hides in the bridge (src/ehp.rs HIDDEN_COMMANDS: a sample) and others it
 // keeps (the premise: the list is the engine's own).
 const EHP_HIDDEN = ["file.newProject", "file.openDemoProject", "file.revealInFinder", "file.watchFolder", "effect.plugins.load", "help.github"];
@@ -472,6 +545,7 @@ async function runEhp(ectx, parentOrigin) {
   const state = async () =>
     evalIn(parentCtx(parentOrigin), "JSON.parse(JSON.stringify({ log: __ehp.log, ids: __ehp.ids, harness: __ehp.harness, saves: __ehp.saves, acks: __ehp.acks, exports: __ehp.exports, picks: __ehp.picks, needs: __ehp.needs }))");
   const step = (name) => evalIn(parentCtx(parentOrigin), `__ehp.step.${name}()`);
+  const stepWith = (name, ...args) => evalIn(parentCtx(parentOrigin), `__ehp.step.${name}(${args.map((a) => (a === undefined ? "undefined" : JSON.stringify(a))).join(", ")})`);
   const exec = (command, params) =>
     evalIn(ectx, `window.effectcraft.execute(${JSON.stringify(command)}, ${JSON.stringify(params || {})}).then((v) => JSON.parse(JSON.stringify(v ?? null)))`, true, 60000);
   const request = (method) => evalIn(ectx, `window.effectcraft.request(${JSON.stringify(method)}, {}).then((v) => JSON.parse(JSON.stringify(v ?? null)))`, true, 60000);
@@ -728,6 +802,44 @@ async function runEhp(ectx, parentOrigin) {
     }
   }
 
+  // 7a. E2-KIN (lot KIN-FK-B2, Q-K41 (a)): the palette the editor shows (effectcraft.info().evoraTheme,
+  //     the values compiled and applied): zinc surfaces, no gradient, the 12 px radius, the accent of
+  //     evora:init and evora:theme with its shades, every pair above its WCAG floor; in light (indigo,
+  //     after the second evora:theme), in dark with another accent (pink), then light indigo again.
+  {
+    const look = () => evalIn(ectx, "JSON.parse(JSON.stringify((window.effectcraft.info() || {}).evoraTheme || null))");
+    const lookUntil = async (pred) => {
+      const end = Date.now() + EHP_WAIT_MS;
+      let t = await look();
+      while (!(t && pred(t)) && Date.now() < end) {
+        await sleep(250);
+        t = await look();
+      }
+      return t;
+    };
+    const judge = (t, kind, accent, what) => {
+      const want = THEME_SURFACES[kind];
+      const surfaces = !!t && t.kind === kind && Object.keys(want).every((k) => t[k] === want[k]);
+      check(surfaces && t.gradients === false && t.radius === 12 && t.radiusSm === 4 && t.accent === accent && t.hostAccent === accent, `[ehp-theme] palette E2-KIN (${what}) absente : ${JSON.stringify(t)}`);
+      const low = t ? THEME_PAIRS.map(([a, b, min]) => [a, b, min, Math.round(contrast(t[a], t[b]) * 100) / 100]).filter(([, , min, r]) => !(r >= min)) : ["illisible"];
+      check(!!t && low.length === 0, `[ehp-theme] contrastes sous le seuil (${what}) : ${JSON.stringify(low)}`);
+      note(`theme ${what}`, t);
+    };
+    judge(await lookUntil((t) => t.kind === "light" && t.accent === "#4f46e5"), "light", "#4f46e5", "clair, indigo");
+    await step("theme3");
+    s = await until("[ehp-theme] accusé d'evora:theme (sombre, rose)", (x) => answersTo(x, x.ids.theme3).length > 0);
+    check(!!s && ackOk(s, s.ids.theme3), `[ehp-theme] accusé d'evora:theme (sombre, rose) : ${JSON.stringify(s ? answersTo(s, s.ids.theme3) : null)}`);
+    judge(await lookUntil((t) => t.kind === "dark" && t.accent === "#db2777"), "dark", "#db2777", "sombre, rose");
+    if (pageSession && label === "pont-ehp") {
+      await sleep(1500);
+      const shot = await send("Page.captureScreenshot", { format: "png" }, pageSession).catch(() => null);
+      if (shot) writeFileSync(join(out, `smoke-${label}-sombre.png`), Buffer.from(shot.data, "base64"));
+    }
+    await step("theme4");
+    s = await until("[ehp-theme] accusé d'evora:theme (clair, indigo)", (x) => answersTo(x, x.ids.theme4).length > 0);
+    judge(await lookUntil((t) => t.kind === "light" && t.accent === "#4f46e5"), "light", "#4f46e5", "clair, indigo, de retour");
+  }
+
   // 7b. KIN-01: the menu entries that can't work in Evora's editor are hidden, and refused.
   {
     const items = await request("ui.menu.list");
@@ -743,6 +855,22 @@ async function runEhp(ectx, parentOrigin) {
     note("menus invoke", { refused, before: before && before.path, after: after && after.path });
     const isRefused = !!refused && (refused.rejected !== undefined || refused.ok === false);
     check(isRefused && after && before && after.path === before.path, `[ehp-menus] commande masquée exécutée : ${JSON.stringify({ refused, before, after })}`);
+  }
+
+  // 7b'. The « Kinetika » keyboard shortcut profile (lot KIN-FK-B2, Q-K19 (a)): active, the common
+  //      conventions bound, no single character key, and the menus show its keys.
+  {
+    const list = await exec("shortcuts.list", { assigned: true });
+    const rows = (list && Array.isArray(list.commands)) ? list.commands : [];
+    const keysOf = (key) => ((rows.find((x) => x.key === key) || {}).keys || []);
+    const single = rows.flatMap((x) => (x.keys || []).filter(singleKey).map((k) => `${x.key} = ${k}`));
+    const items = await request("ui.menu.list");
+    const save = (items || []).find((it) => it.id === "file.save");
+    note("keys", { preset: list && list.preset, presets: list && list.presets, assigned: rows.length, single, save: save && save.shortcut });
+    check(!!list && list.preset === "Kinetika", `[ehp-keys] profil « Kinetika » inactif : ${JSON.stringify(list && { preset: list.preset, presets: list.presets })}`);
+    check(keysOf("file.save").includes("Cmd+S") && keysOf("edit.undo").includes("Cmd+Z") && keysOf("edit.copy").includes("Cmd+C") && rows.length >= 10, `[ehp-keys] prémisse : conventions communes absentes du profil : ${JSON.stringify(rows.map((x) => [x.key, x.keys]).slice(0, 40))}`);
+    check(single.length === 0, `[ehp-keys] raccourcis d'une seule touche dans le profil : ${JSON.stringify(single.slice(0, 20))}`);
+    check(!!save && save.shortcut === "Cmd+S", `[ehp-keys] les menus ne montrent pas le raccourci du profil : ${JSON.stringify(save)}`);
   }
 
   // 7c. ui.focus-out: F6 in the engine goes back to the Evora page (evora:focus-out {}), once per
@@ -856,6 +984,140 @@ async function runEhp(ectx, parentOrigin) {
     check(!!sum && sum.path === "/evora-medias.ecproj" && !!check2 && check2.checked === 2 && check2.missing === 0, `[ehp-need] le projet rouvert n'a pas retrouvé ses deux médias : ${JSON.stringify({ path: sum && sum.path, check: check2 })}`);
   }
 
+  // 7g. command.catalog (lot KIN-FK-B2; AVENANT of 2026-10-27, §4 and §5): evora:commands after the
+  //     answer to evora:init (fr) and after evora:lang (de), the same ids and hash; a white list by
+  //     construction, no free parameter, the removal markers all destructive; a catalog command runs,
+  //     a command outside it doesn't, nor one with a parameter, nor a destructive one unconfirmed.
+  {
+    const cats = await evalIn(parentCtx(parentOrigin), "JSON.parse(JSON.stringify(__ehp.catalogs))");
+    s = await state();
+    const initAck = answersTo(s, s.ids.init).find((m) => m.type === "evora:ack");
+    const fr = cats.find((c) => c.payload && c.payload.lang === "fr");
+    const de = cats.find((c) => c.payload && c.payload.lang === "de");
+    const first = cats[0];
+    note("catalogs", cats.map((c) => ({ seq: c.seq, lang: c.payload && c.payload.lang, count: c.payload && c.payload.count, hash: c.payload && c.payload.hash })));
+    check(!!first && first === fr && !!initAck && first.seq > initAck.seq && first.re === null && JSON.stringify([...first.keys].sort()) === JSON.stringify(["id", "payload", "type", "v"]), `[ehp-commands] evora:commands absent après l'accusé d'evora:init (fr) : ${JSON.stringify({ first: first && { seq: first.seq, re: first.re, keys: first.keys, lang: first.payload && first.payload.lang }, initAck: initAck && initAck.seq })}`);
+    check(!!de, `[ehp-commands] aucun evora:commands après evora:lang (de) : ${JSON.stringify(cats.map((c) => c.payload && c.payload.lang))}`);
+    if (fr && label === "pont-ehp") {
+      writeFileSync(join(out, "commands.json"), `${JSON.stringify({ app: r.ready && r.ready.app, version: r.ready && r.ready.version, ...fr.payload }, null, 2)}\n`);
+    }
+    for (const c of [fr, de].filter(Boolean)) {
+      const p = c.payload || {};
+      const cmds = Array.isArray(p.commands) ? p.commands : [];
+      const ids = cmds.map((x) => String(x.id));
+      const bad = cmds.filter((x) => !(x && CAT_ID.test(String(x.id)) && String(x.id).length <= 100 && typeof x.label === "string" && x.label.length >= 1 && x.label.length <= 200
+        && Array.isArray(x.path) && x.path.length <= 8 && x.path.every((e) => typeof e === "string" && e.length >= 1 && e.length <= 200)
+        && typeof x.enabled === "boolean" && typeof x.destructive === "boolean" && Object.keys(x).every((k) => ["id", "label", "path", "enabled", "destructive"].includes(k))));
+      check(/^[0-9a-f]{16}$/.test(String(p.hash)) && p.count === cmds.length && cmds.length >= 1 && cmds.length <= 2000 && bad.length === 0 && new Set(ids).size === ids.length
+        && JSON.stringify(Object.keys(p).sort()) === JSON.stringify(["commands", "count", "hash", "lang", "params"]), `[ehp-commands] catalogue hors schéma (${p.lang}) : ${JSON.stringify({ hash: p.hash, count: p.count, n: cmds.length, keys: Object.keys(p), bad: bad.slice(0, 5) })}`);
+      check(catalogHash(cmds) === p.hash, `[ehp-commands] empreinte du catalogue (${p.lang}) différente de celle des identifiants : ${p.hash} contre ${catalogHash(cmds)}`);
+      const outside = ids.filter((id) => (id.startsWith("file.") && !CAT_FILE_ADMITTED.includes(id)) || /^(app|help|prefs)\./.test(id) || CAT_OFF.includes(id) || EHP_HIDDEN.includes(id));
+      check(outside.length === 0, `[ehp-commands] hors liste blanche (${p.lang}) : ${JSON.stringify(outside.slice(0, 20))}`);
+      const missing = CAT_PREMISE.filter((id) => !ids.includes(id));
+      check(missing.length === 0 && ids.some((id) => id.startsWith("effect.apply.effect-")), `[ehp-commands] prémisse : commandes attendues absentes du catalogue (${p.lang}) : ${JSON.stringify(missing)}`);
+      const unflagged = CAT_DESTRUCTIVE_PREMISE.filter((id) => !cmds.some((x) => x.id === id && x.destructive === true));
+      const marked = cmds.filter((x) => !x.destructive && !CAT_EXCEPTIONS[x.id] && (idWords(x.id).some((w) => CAT_MARK_ID.has(w)) || labelWords(x.label).some((w) => CAT_MARK_LABEL.has(w))));
+      check(unflagged.length === 0 && marked.length === 0, `[ehp-commands] commandes de retrait non destructives (${p.lang}) : ${JSON.stringify({ unflagged, marked: marked.map((x) => [x.id, x.label]).slice(0, 20) })}`);
+      const branded = cmds.filter((x) => CAT_BRAND.test(x.label) || x.path.some((e) => CAT_BRAND.test(e)));
+      check(branded.length === 0, `[ehp-commands] marque ou terme tiers dans le catalogue (${p.lang}) : ${JSON.stringify(branded.map((x) => [x.id, x.label, x.path]).slice(0, 10))}`);
+    }
+    check(!!fr && !!de && fr.payload.hash === de.payload.hash && fr.payload.count === de.payload.count && JSON.stringify(fr.payload.commands.map((x) => x.id)) === JSON.stringify(de.payload.commands.map((x) => x.id)), `[ehp-commands] catalogues fr et de différents (identifiants ou empreinte) : ${JSON.stringify([fr && fr.payload.hash, de && de.payload.hash])}`);
+    const code = (st, key) => {
+      const a = answersTo(st, st.ids[key]).find((m) => m.type === "evora:ack");
+      return a && a.payload ? (a.payload.ok === true ? "ok" : String(a.payload.code)) : null;
+    };
+    const run = async (key, command, params, confirmed) => {
+      await stepWith("cmd", key, command, params, confirmed);
+      const st = await until(`[ehp-command] accusé d'evora:command (${key})`, (x) => !!x.ids[key] && answersTo(x, x.ids[key]).some((m) => m.type === "evora:ack"));
+      return st ? code(st, key) : null;
+    };
+    const count = async () => {
+      const sum = await exec("project.summary");
+      return sum && Array.isArray(sum.items) ? sum.items.length : -1;
+    };
+    // A catalog command runs as its menu entry does: File ▸ New ▸ New Folder adds an item.
+    const n0 = await count();
+    const c1 = await run("cmd1", "project.newFolder", {});
+    const n1 = await count();
+    note("command", { c1, items: [n0, n1] });
+    check(c1 === "ok" && n0 >= 0 && n1 === n0 + 1, `[ehp-command] commande du catalogue sans effet : ${JSON.stringify({ code: c1, items: [n0, n1] })}`);
+    // Outside the catalog: refused, nothing sent (no evora:save for File ▸ Save, the shell's).
+    const saves0 = (await state()).saves.length;
+    const c2 = await run("cmd2", "file.save", {});
+    const c3 = await run("cmd3", "app.about", {});
+    await sleep(EHP_ROGUE_SETTLE_MS);
+    const saves1 = (await state()).saves.length;
+    note("command outside", { c2, c3, saves: [saves0, saves1] });
+    check(c2 === "capability" && c3 === "capability" && saves1 === saves0, `[ehp-command-scope] commande hors catalogue exécutée : ${JSON.stringify({ c2, c3, saves: [saves0, saves1] })}`);
+    // No free parameter: a catalog command with one (here a path) is refused, without effect.
+    const c4 = await run("cmd4", "project.newFolder", { name: "/opfs/evora/../x" });
+    const n2 = await count();
+    note("command params", { c4, items: [n1, n2] });
+    check(c4 === "invalid_content" && n2 === n1, `[ehp-command-params] paramètre libre admis : ${JSON.stringify({ code: c4, items: [n1, n2] })}`);
+    // Destructive: refused without confirmed: true (absent or false), run with it.
+    const c5 = await run("cmd5", "edit.purge.what-memory", {});
+    const c6 = await run("cmd6", "edit.purge.what-memory", {}, false);
+    const c7 = await run("cmd7", "edit.clear", {});
+    const n3 = await count();
+    const c8 = await run("cmd8", "edit.purge.what-memory", {}, true);
+    note("command destructive", { c5, c6, c7, c8, items: [n2, n3] });
+    check(c5 === "forbidden" && c6 === "forbidden" && c7 === "forbidden" && n3 === n2 && c8 === "ok", `[ehp-command-destructive] commande destructive sans confirmation : ${JSON.stringify({ c5, c6, c7, c8, items: [n2, n3] })}`);
+  }
+
+  // 7h. font.inject (lot KIN-FK-B2, E6): the bench's font (a TrueType font of the runner, served by
+  //     the parent) joins the engine's fonts, non-fonts are refused; a text in it draws unlike the
+  //     same text in Inter, on the page (Composition ▸ Save Frame) and in the job workers (Render
+  //     Queue: the files of each stored .zip).
+  {
+    const users = async () => {
+      const f = await exec("text.fonts");
+      return (f && Array.isArray(f.families) ? f.families : []).filter((x) => x.origin === "user").map((x) => String(x.family));
+    };
+    const u0 = await users();
+    await step("font");
+    s = await until("[ehp-font] accusé d'evora:font", (x) => !!x.ids.font && answersTo(x, x.ids.font).length > 0, EHP_V1_WAIT_MS);
+    const font = await evalIn(parentCtx(parentOrigin), "JSON.parse(JSON.stringify(__ehp.font))");
+    const fontAck = s ? answersTo(s, s.ids.font) : null;
+    const u1 = await users();
+    const added = u1.filter((f) => !u0.includes(f));
+    note("font", { font, ack: fontAck, before: u0, after: u1 });
+    check(!!font && !font.error && ["00010000", "4f54544f", "74727565"].includes(font.magic), `[ehp-font] prémisse : police du banc illisible : ${JSON.stringify(font)}`);
+    check(u0.length === 0, `[ehp-font] prémisse : police « user » avant l'injection : ${JSON.stringify(u0)}`);
+    check(!!s && ackOk(s, s.ids.font) && added.length >= 1, `[ehp-font] police injectée absente des polices du moteur : ${JSON.stringify({ ack: fontAck, added })}`);
+    await step("fontBad");
+    s = await until("[ehp-font] accusé d'une fausse police", (x) => !!x.ids.fontBad && answersTo(x, x.ids.fontBad).length > 0);
+    const badAck = s ? answersTo(s, s.ids.fontBad).find((m) => m.type === "evora:ack") : null;
+    check(!!badAck && badAck.payload && badAck.payload.ok === false && badAck.payload.code === "invalid_content" && (await users()).length === u1.length, `[ehp-font] des octets qui ne sont pas une police admis : ${JSON.stringify(badAck)}`);
+    const family = added[0];
+    if (family) {
+      const mark = (await state()).exports.length;
+      const frame = async (name, fontName) => {
+        await exec("comp.new", { name, width: 240, height: 80, duration: 0.1 });
+        await exec("layer.newText", { text: "Kinetika Evora", font: fontName, size: 40 });
+        const before = (await state()).exports.length;
+        await requestWith("ui.menu.invoke", { command: "comp.saveFrameAs" });
+        const st = await until(`[ehp-font] rendu d'image (${name})`, (x) => x.exports.length > before, EHP_V1_WAIT_MS);
+        return st ? st.exports[st.exports.length - 1] : null;
+      };
+      const a = await frame("PoliceA", family);
+      const b = await frame("PoliceB", "Inter");
+      note("font frames", { a, b });
+      check(!!a && !!b && a.magic === "89504e47" && b.magic === "89504e47" && a.sum !== b.sum, `[ehp-font] le texte se rend en police injectée comme en police de repli : ${JSON.stringify({ a, b })}`);
+      const queued = async (name) => {
+        const before = (await state()).exports.length;
+        const added2 = await exec("renderQueue.add", { comp: name, format: "png" }).catch((e) => ({ error: String(e && e.message) }));
+        const rendered = await exec("renderQueue.render", { wait: true }).catch((e) => ({ error: String(e && e.message) }));
+        const st = await until(`[ehp-font-worker] rendu de la file (${name})`, (x) => x.exports.slice(before).some((e) => /\.zip$/.test(String(e.name)) || /\.png$/.test(String(e.name))), EHP_V1_WAIT_MS);
+        const e = st ? st.exports.slice(before).find((x) => /\.zip$/.test(String(x.name)) || /\.png$/.test(String(x.name))) : null;
+        return { added: added2, rendered, export: e, sums: e ? (e.entries.length ? e.entries : [e.sum]) : [] };
+      };
+      const qa = await queued("PoliceA");
+      const qb = await queued("PoliceB");
+      note("font render queue", { qa, qb, mark });
+      check(qa.sums.length >= 1 && qb.sums.length >= 1 && qa.sums.every((x) => !qb.sums.includes(x)), `[ehp-font-worker] les rendus de la file ignorent la police injectée : ${JSON.stringify({ a: qa.sums, b: qb.sums, ea: qa.export && qa.export.name, eb: qb.export && qb.export.name })}`);
+    }
+  }
+
   // 8. evora:purge: answered after the stores are gone, nothing comes back afterwards.
   const beforePurge = await listing();
   r.beforePurge = beforePurge;
@@ -938,6 +1200,7 @@ try {
   await systemGpu();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: page } = await send("Target.attachToTarget", { targetId, flatten: true });
+  pageSession = page;
   sessions.set(page, { type: "page", url: parentUrl });
   await setup(page, "page");
   await send("Emulation.setDeviceMetricsOverride", { width: 1400, height: 900, deviceScaleFactor: 1, mobile: false }, page);

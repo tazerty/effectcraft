@@ -23,6 +23,10 @@
 // (accusé), à evora:pick (deux images sous /evora/<uid>/ pour un import, le fichier du chemin pour
 // une reliaison, « cancelled » pour une ouverture) et à evora:need (les images demandées, par leur
 // nom, puis l'accusé de clôture) ; elle peut refuser le prochain enregistrement (failNext).
+// Lot KIN-FK-B2 : la coquille garde chaque catalogue evora:commands (S.catalogs ; le journal n'en
+// garde que lang, count et hash), envoie evora:command et evora:font (la police du banc, servie par
+// le parent sous /evora-font.ttf), et note de chaque export une empreinte de ses octets (et de chaque
+// fichier d'un .zip stocké).
 const q = new URLSearchParams(location.search);
 const ENGINE = q.get("engine");
 const ROGUE = q.get("rogue");
@@ -55,7 +59,28 @@ const mediaBytes = (name) => Uint8Array.from(atob(MEDIA[name]), (c) => c.charCod
 // Drive uids of the imported media (U1) and of the same media under the reopened project (U2).
 const U1 = "01JZMEDA0000000000000000AA";
 const U2 = "01JZMEDB0000000000000000BB";
-const S = (window.__ehp = { log: [], ids: {}, harness: [], saves: [], acks: {}, version: 1, seq: 0, failNext: 0, exports: [], picks: [], needs: [], texts: {} });
+const S = (window.__ehp = { log: [], ids: {}, harness: [], saves: [], acks: {}, version: 1, seq: 0, failNext: 0, exports: [], picks: [], needs: [], texts: {}, catalogs: [], font: null });
+// FNV-1a 32 bits of some bytes (an export's identity: two renders of different pixels differ).
+const fnv = (u8) => {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < u8.length; i++) h = Math.imul(h ^ u8[i], 0x01000193) >>> 0;
+  return h.toString(16).padStart(8, "0");
+};
+// The files of a stored .zip (no compression, no data descriptor: src/files.rs zip_store): the
+// fingerprint of each file's bytes, in order.
+const zipSums = (u8) => {
+  const out = [];
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let off = 0;
+  while (off + 30 <= u8.length && dv.getUint32(off, true) === 0x04034b50) {
+    const size = dv.getUint32(off + 18, true);
+    const start = off + 30 + dv.getUint16(off + 26, true) + dv.getUint16(off + 28, true);
+    if (start + size > u8.length) break;
+    out.push(fnv(u8.subarray(start, start + size)));
+    off = start + size;
+  }
+  return out;
+};
 const engine = document.getElementById("engine");
 const rogueSource = document.getElementById("rogue-source");
 const rogueOrigin = document.getElementById("rogue-origin");
@@ -98,8 +123,13 @@ addEventListener("message", (e) => {
     type: plain ? d.type : null,
     id: plain ? d.id : null,
     re: plain && d.re !== undefined ? d.re : null,
-    payload: plain ? describe(d.payload) : null,
+    // A catalog is kept whole in S.catalogs; the log keeps its language, count and hash only.
+    payload: plain ? (d.type === "evora:commands" && d.payload ? { lang: d.payload.lang, count: d.payload.count, hash: d.payload.hash } : describe(d.payload)) : null,
   });
+  if (fromEngine && plain && d.v === 1 && d.type === "evora:commands") {
+    S.catalogs.push({ at, seq, id: d.id, re: d.re !== undefined ? d.re : null, keys: Object.keys(d), payload: describe(d.payload) });
+    return;
+  }
   if (!fromEngine || !plain || d.v !== 1) return;
   const p = d.payload || {};
   if (d.type === "evora:ready") {
@@ -157,6 +187,8 @@ addEventListener("message", (e) => {
     S.exports.push({
       at, seq, id: d.id, docRef: p.docRef ?? null, name: p.name, mime: p.mime, arrayBuffer: !!bytes, byteLength: bytes ? bytes.byteLength : -1,
       magic: bytes ? Array.from(bytes.slice(0, 4), (b) => b.toString(16).padStart(2, "0")).join("") : "",
+      sum: bytes ? fnv(bytes) : "",
+      entries: bytes && /\.zip$/.test(String(p.name)) ? zipSums(bytes) : [],
     });
     send({ v: 1, type: "evora:ack", id: ulid(), re: d.id, payload: { ok: true } });
   } else if (d.type === "evora:pick") {
@@ -253,6 +285,33 @@ S.step = {
     return true;
   },
   purge: () => request("purge", "evora:purge", { scope: "current" }),
+  // Lot KIN-FK-B2. E2-KIN : un autre accent (rose), en sombre, puis l'indigo en clair.
+  theme3: () => request("theme3", "evora:theme", { theme: "dark", accent: "#DB2777" }),
+  theme4: () => request("theme4", "evora:theme", { theme: "light", accent: "#4F46E5" }),
+  // command.catalog : une commande ; `confirmed` absent quand il vaut undefined.
+  cmd(key, command, params, confirmed) {
+    const payload = { command, params: params || {} };
+    if (confirmed !== undefined) payload.confirmed = confirmed;
+    return request(key, "evora:command", payload);
+  },
+  // font.inject : la police du banc (servie par le parent), puis des octets qui n'en sont pas une.
+  font() {
+    fetch("/evora-font.ttf", { cache: "no-store" })
+      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((b) => {
+        S.font = { byteLength: b.byteLength, magic: Array.from(new Uint8Array(b, 0, 4), (x) => x.toString(16).padStart(2, "0")).join("") };
+        S.ids.font = ulid();
+        send({ v: 1, type: "evora:font", id: S.ids.font, payload: { family: "Evora Banc", format: "ttf", bytes: b } }, [b]);
+      })
+      .catch((e) => (S.font = { error: String(e) }));
+    return true;
+  },
+  fontBad() {
+    const b = new TextEncoder().encode("plain text, not a font").buffer;
+    S.ids.fontBad = ulid();
+    send({ v: 1, type: "evora:font", id: S.ids.fontBad, payload: { family: "Faux", format: "ttf", bytes: b } }, [b]);
+    return true;
+  },
 };
 
 engine.src = `${ENGINE}/evora-seed.html?parent=${encodeURIComponent(location.origin)}&own=${encodeURIComponent(NS)}&q=${encodeURIComponent(EQ)}`;
