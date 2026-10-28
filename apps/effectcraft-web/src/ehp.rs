@@ -836,6 +836,15 @@ fn open_document(app: &mut EffectcraftApp, id: String, doc_ref: String, name: St
             Err(e) => Err(e),
         },
     };
+    if opened.is_ok() {
+        // Evora (KIN-05): the footage paths a project file stores are followed as given in the
+        // bridge. Upstream follows them through `craft_docpath::resolve_absolute`, whose result is
+        // never absolute on wasm32-unknown-unknown (`Path::is_absolute` needs a Unix or Windows
+        // target): every stored path would stay refused, and missing for good, even once Evora sends
+        // its file (`evora:need`). Here a path only names an entry of the engine's file table, which
+        // Evora fills (`evora:file`); no network share, device nor local file is ever reached.
+        app.session.stored_paths = Default::default();
+    }
     let Some(state) = bridge() else { return };
     let mut st = state.borrow_mut();
     match opened {
