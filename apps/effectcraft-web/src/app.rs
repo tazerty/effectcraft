@@ -156,6 +156,8 @@ impl eframe::App for WebApp {
         // frame while its iframe isn't painted. Once per change (`prefs_revision`).
         if crate::ehp::hosted() {
             self.app.apply_prefs(ctx);
+            // Evora (KIN-FK-B2, E2-KIN): the palette shown, for the CI bench (once per change).
+            crate::ehp::report_theme(&self.app.tokens);
         }
         // Files dropped on the page: read them, then open/import. Evora (KIN-01): not in the host
         // bridge, where files come from Evora (File ▸ Import).

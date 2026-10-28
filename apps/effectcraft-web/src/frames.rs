@@ -125,6 +125,15 @@ impl WebFrames {
                 frame_worker_post(w.index, &obj(&[("type", "file".into()), ("path", p.as_str().into()), ("bytes", bytes.into())]), &js_sys::Array::new());
                 w.files.insert(p, version);
             }
+            // Evora (KIN-FK-B2, font.inject): the fonts Evora gave the engine, once per worker.
+            for (p, d, version) in crate::ehp::injected_fonts() {
+                if w.files.get(&p) == Some(&version) {
+                    continue;
+                }
+                let bytes = js_sys::Uint8Array::from(&d[..]);
+                frame_worker_post(w.index, &obj(&[("type", "file".into()), ("path", p.as_str().into()), ("bytes", bytes.into())]), &js_sys::Array::new());
+                w.files.insert(p, version);
+            }
             let sync = w.mirror.sync(job.revision, &job.project);
             let index = w.index;
             let mut sent = 0;

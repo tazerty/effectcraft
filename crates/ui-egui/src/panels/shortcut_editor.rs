@@ -236,7 +236,11 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mods = if held.iter().any(|m| *m) && !st.recording { held } else { st.mods };
 
     let table = app.session.shortcuts().clone();
-    let presets = app.session.keymaps.names();
+    // Evora (KIN-FK-B2, Q-K19 (a)): under a host profile ([`crate::menus::host_keymap_name`]),
+    // upstream's built-in preset isn't offered, and the host's profile is neither renamed, deleted
+    // nor reset (its keys can still be changed, or the profile duplicated).
+    let host_profile = crate::menus::host_keymap_name();
+    let presets: Vec<String> = app.session.keymaps.names().into_iter().filter(|n| host_profile.is_none() || n != DEFAULT_PRESET).collect();
     let active = app.session.keymaps.active.clone();
     // key name → (app?, panel?) for the current modifiers.
     let mut keymap: std::collections::HashMap<String, (bool, bool)> = Default::default();
@@ -266,7 +270,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 }
             });
             app.auto.add("shortcuts.preset", r.response.rect, "Preset");
-            let custom = active != DEFAULT_PRESET;
+            let custom = active != DEFAULT_PRESET && host_profile != Some(active.as_str());
             let b = ui.button(tr("Duplicate"));
             app.auto.add("shortcuts.duplicate", b.rect, "Duplicate");
             if b.clicked() {
@@ -562,12 +566,16 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     }
                 }
                 ui.add_space(6.0);
-                let r = ui.add_enabled(keys != b.defaults, egui::Button::new(tr("Reset to Default")));
-                app.auto.add("shortcuts.resetCommand", r.rect, "Reset to Default");
-                if r.clicked() {
-                    run.push(("shortcuts.reset".into(), json!({"command": b.command, "params": b.params})));
+                // Evora (KIN-FK-B2): under a host profile, upstream's default keys are neither shown
+                // nor brought back (the member records the keys they want).
+                if host_profile.is_none() {
+                    let r = ui.add_enabled(keys != b.defaults, egui::Button::new(tr("Reset to Default")));
+                    app.auto.add("shortcuts.resetCommand", r.rect, "Reset to Default");
+                    if r.clicked() {
+                        run.push(("shortcuts.reset".into(), json!({"command": b.command, "params": b.params})));
+                    }
                 }
-                if !b.defaults.is_empty() {
+                if host_profile.is_none() && !b.defaults.is_empty() {
                     let d: Vec<String> = b.defaults.iter().map(|k| crate::menus::shortcut_text(k)).collect();
                     ui.label(RichText::new(tr_args("Default: {}", &[&(d.join(", "))])).color(t.text_faint));
                 }

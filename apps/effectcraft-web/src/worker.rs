@@ -64,6 +64,11 @@ impl Offload for WorkerOffload {
                 files.push(&js_sys::Array::of3(&JsValue::from_str(p), &js_sys::Uint8Array::from(&d[..]), &JsValue::from_f64(version as f64)));
             }
         }
+        // Evora (KIN-FK-B2, font.inject): the fonts Evora gave the engine render in the worker too
+        // (sent once per worker, like a footage file).
+        for (p, d, version) in crate::ehp::injected_fonts() {
+            files.push(&js_sys::Array::of3(&JsValue::from_str(&p), &js_sys::Uint8Array::from(&d[..]), &JsValue::from_f64(version as f64)));
+        }
         let json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
         let on: OnMessage = Closure::new(move |kind: String, json: JsValue, path: JsValue, bytes: JsValue| {
             match kind.as_str() {
@@ -190,6 +195,12 @@ pub fn pool() -> Arc<effectcraft_media::MediaPool> {
 /// A footage file for the jobs that follow.
 #[wasm_bindgen(js_name = workerFile)]
 pub fn worker_file(path: String, bytes: js_sys::Uint8Array) {
+    // Evora (KIN-FK-B2, font.inject): a font Evora gave the page joins this worker's fonts, not its
+    // file table.
+    if crate::ehp::is_font_path(&path) {
+        crate::ehp::worker_font(&path, bytes.to_vec());
+        return;
+    }
     let data: Arc<[u8]> = bytes.to_vec().into();
     crate::files::STORE.put_file(&path, data.clone(), false);
     POOL.with(|p| {

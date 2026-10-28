@@ -264,13 +264,20 @@ impl Tokens {
     /// Theme tokens for the current settings: theme, UI brightness and label colours.
     /// The tokens for theme `kind` (resolved from the appearance mode) with the rest of the
     /// Appearance settings: brightness, label colours, gradients.
+    ///
+    /// Evora (KIN-FK-B2, E2-KIN): under Evora's editor ([`set_host_accent`]) the palette is the
+    /// host's ([`Tokens::evora`]): the engine's brightness and gradient settings don't apply there.
     pub fn from_prefs(p: &effectcraft_engine::prefs::Prefs, kind: ThemeKind) -> Tokens {
-        let mut t = Tokens::for_kind(kind).with_brightness(p.appearance.brightness as f32);
+        let host = host_accent();
+        let mut t = match host {
+            Some(accent) => Tokens::evora(kind, accent),
+            None => Tokens::for_kind(kind).with_brightness(p.appearance.brightness as f32),
+        };
         for (i, l) in effectcraft_color::Label::ALL.iter().enumerate() {
             let [r, g, b] = p.label_rgb(*l);
             t.labels[i] = Color32::from_rgb(r, g, b);
         }
-        t.gradients = p.appearance.use_gradients;
+        t.gradients = host.is_none() && p.appearance.use_gradients;
         t
     }
 
@@ -320,6 +327,188 @@ fn default_labels() -> [Color32; 17] {
         let [r, g, b] = l.rgb();
         Color32::from_rgb(r, g, b)
     })
+}
+
+/// Evora (KIN-FK-B2, E2-KIN): the accent Evora's editor imposes (`evora:init`, `evora:theme`),
+/// once the host bridge runs; `None` without a host (upstream's palette, E2's accent).
+static HOST_ACCENT: std::sync::RwLock<Option<Color32>> = std::sync::RwLock::new(None);
+
+/// Evora (KIN-FK-B2, E2-KIN): Evora's editor imposes its palette with `accent` (the host bridge
+/// sets it at `evora:init` and at every `evora:theme`; [`Tokens::from_prefs`] reads it).
+pub fn set_host_accent(accent: Color32) {
+    *HOST_ACCENT.write().unwrap_or_else(|e| e.into_inner()) = Some(accent);
+}
+
+/// The accent Evora's editor imposes, if it does.
+pub fn host_accent() -> Option<Color32> {
+    *HOST_ACCENT.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Evora's indigo (#4F46E5, Tailwind indigo-600), the accent Evora's shell sends today.
+const INDIGO: Color32 = Color32::from_rgb(0x4f, 0x46, 0xe5);
+/// The E2-KIN table's shades of the indigo (apps/kinetika/CONCEPTION-PRO.md section 8.3 in Evora):
+/// hover and focus, highlighted text and timecode, playhead and selected keyframes, selection fill.
+const INDIGO_DARK: [Color32; 4] =
+    [Color32::from_rgb(0x63, 0x66, 0xf1), Color32::from_rgb(0xa5, 0xb4, 0xfc), Color32::from_rgb(0x81, 0x8c, 0xf8), Color32::from_rgb(0x31, 0x2e, 0x81)];
+const INDIGO_LIGHT: [Color32; 4] =
+    [Color32::from_rgb(0x43, 0x38, 0xca), Color32::from_rgb(0x43, 0x38, 0xca), Color32::from_rgb(0x43, 0x38, 0xca), Color32::from_rgb(0xc7, 0xd2, 0xfe)];
+/// The contrast floors the shades of another accent keep (WCAG ratios): highlighted text and the
+/// text on the selection fill at 7:1, the playhead and selected keyframes at 4.5:1, as the indigo
+/// table measures them (8.89, 9.00 and 5.94 in dark; 7.19 and 11.88 in light).
+const TEXT_CONTRAST: f32 = 7.0;
+const MARK_CONTRAST: f32 = 4.5;
+/// How far the hover and focus shade of another accent moves toward white (dark) or black (light).
+const HOVER_MIX: f32 = 0.15;
+/// The steps (twentieths) in which a shade moves until it reaches its contrast floor.
+const SHADE_STEPS: u32 = 20;
+
+/// WCAG relative luminance of an opaque colour.
+fn luminance(c: Color32) -> f32 {
+    let lin = |v: u8| {
+        let s = f32::from(v) / 255.0;
+        if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+}
+
+/// WCAG contrast ratio of two opaque colours (1 to 21).
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// `from` moved toward `to` until it reaches `ratio` against every colour of `on`; `to` itself
+/// when no step does.
+fn toward(from: Color32, to: Color32, on: &[Color32], ratio: f32) -> Color32 {
+    (0..=SHADE_STEPS)
+        .map(|i| from.lerp_to_gamma(to, i as f32 / SHADE_STEPS as f32))
+        .find(|c| on.iter().all(|b| contrast(*c, *b) >= ratio))
+        .unwrap_or(to)
+}
+
+/// The accent's shades on palette `t`: hover and focus, highlighted text, playhead and selected
+/// keyframes, selection fill. Evora's indigo takes the E2-KIN table's; another accent gets shades
+/// computed here, each at its contrast floor against the surfaces it is drawn on.
+fn accent_shades(t: &Tokens, accent: Color32) -> [Color32; 4] {
+    let light = t.kind.is_light();
+    if accent == INDIGO {
+        return if light { INDIGO_LIGHT } else { INDIGO_DARK };
+    }
+    // Text and marks move away from the panels (toward black in light, white in dark); the
+    // selection fill moves the other way, so the interface text stays readable on it.
+    let (away, back) = if light { (Color32::BLACK, Color32::WHITE) } else { (Color32::WHITE, Color32::BLACK) };
+    [
+        accent.lerp_to_gamma(away, HOVER_MIX),
+        toward(accent, away, &[t.panel_bg, t.row, t.row_alt], TEXT_CONTRAST),
+        toward(accent, away, &[t.tl_bg, t.panel_bg], MARK_CONTRAST),
+        toward(accent, back, &[t.text], TEXT_CONTRAST),
+    ]
+}
+
+impl Tokens {
+    /// Evora (KIN-FK-B2, E2-KIN; Q-K41 (a), apps/kinetika/CONCEPTION-PRO.md section 8.3 in Evora): the
+    /// palette of Evora's editor. Zinc greys for the interface, an achromatic viewer margin that
+    /// follows the theme, no gradient, the panels' 12 px radius (4 px for dense controls), and the
+    /// host's accent with its shades ([`accent_shades`]). The functional colours (cache bars,
+    /// labels, danger, warning, expressions) stay upstream's. Darker keeps #09090B as its floor,
+    /// with #111113 panels (the reinforced dark variant).
+    pub fn evora(kind: ThemeKind, accent: Color32) -> Tokens {
+        let c = Color32::from_rgb;
+        let base = Tokens::for_kind(kind);
+        let mut t = if kind.is_light() {
+            Tokens {
+                app_bg: c(0xe4, 0xe4, 0xe7),
+                header_bg: c(0xf4, 0xf4, 0xf5),
+                panel_bg: c(0xf4, 0xf4, 0xf5),
+                tab_text: c(0x52, 0x52, 0x5b),
+                tab_text_active: c(0x09, 0x09, 0x0b),
+                text: c(0x18, 0x18, 0x1b),
+                text_dim: c(0x52, 0x52, 0x5b),
+                text_faint: c(0x63, 0x63, 0x6b),
+                icon: c(0x3f, 0x3f, 0x46),
+                icon_active: c(0x09, 0x09, 0x0b),
+                hover: c(0xe4, 0xe4, 0xe7),
+                pressed: c(0xd4, 0xd4, 0xd8),
+                field_bg: c(0xff, 0xff, 0xff),
+                field_border: c(0x8a, 0x8a, 0x93),
+                separator: c(0xd4, 0xd4, 0xd8),
+                row: c(0xf4, 0xf4, 0xf5),
+                row_alt: c(0xec, 0xec, 0xef),
+                tl_bg: c(0xe4, 0xe4, 0xe7),
+                tl_ruler_bg: c(0xf4, 0xf4, 0xf5),
+                tl_ruler_tick: c(0x71, 0x71, 0x7a),
+                tl_ruler_text: c(0x52, 0x52, 0x5b),
+                work_area: c(0xa1, 0xa1, 0xaa),
+                keyframe: c(0x52, 0x52, 0x5b),
+                pasteboard: c(0xd4, 0xd4, 0xd4),
+                fx_header: c(0xe4, 0xe4, 0xe7),
+                tl_graph_selected: c(0xd4, 0xd4, 0xd8),
+                switch_well: c(0xff, 0xff, 0xff),
+                tl_nav_bar: c(0xa1, 0xa1, 0xaa),
+                tl_work_area_bar: c(0x8a, 0x8a, 0x93),
+                expr_bg: c(0xff, 0xff, 0xff),
+                ..base
+            }
+        } else {
+            Tokens {
+                app_bg: c(0x09, 0x09, 0x0b),
+                header_bg: c(0x18, 0x18, 0x1b),
+                panel_bg: c(0x18, 0x18, 0x1b),
+                tab_text: c(0xa1, 0xa1, 0xaa),
+                tab_text_active: c(0xf4, 0xf4, 0xf5),
+                text: c(0xe4, 0xe4, 0xe7),
+                text_dim: c(0xa1, 0xa1, 0xaa),
+                text_faint: c(0xa1, 0xa1, 0xaa),
+                icon: c(0xd4, 0xd4, 0xd8),
+                icon_active: c(0xfa, 0xfa, 0xfa),
+                hover: c(0x27, 0x27, 0x2a),
+                pressed: c(0x3f, 0x3f, 0x46),
+                field_bg: c(0x09, 0x09, 0x0b),
+                field_border: c(0x71, 0x71, 0x7a),
+                separator: c(0x3f, 0x3f, 0x46),
+                row: c(0x18, 0x18, 0x1b),
+                row_alt: c(0x1f, 0x1f, 0x23),
+                tl_bg: c(0x11, 0x11, 0x13),
+                tl_ruler_bg: c(0x18, 0x18, 0x1b),
+                tl_ruler_tick: c(0x71, 0x71, 0x7a),
+                tl_ruler_text: c(0xa1, 0xa1, 0xaa),
+                work_area: c(0x3f, 0x3f, 0x46),
+                keyframe: c(0xa1, 0xa1, 0xaa),
+                pasteboard: c(0x26, 0x26, 0x26),
+                fx_header: c(0x27, 0x27, 0x2a),
+                tl_graph_selected: c(0x27, 0x27, 0x2a),
+                switch_well: c(0x11, 0x11, 0x13),
+                tl_nav_bar: c(0x52, 0x52, 0x5b),
+                tl_work_area_bar: c(0x71, 0x71, 0x7a),
+                expr_bg: c(0x11, 0x11, 0x13),
+                ..base
+            }
+        };
+        if kind == ThemeKind::Darker {
+            t.header_bg = c(0x11, 0x11, 0x13);
+            t.panel_bg = c(0x11, 0x11, 0x13);
+            t.row = c(0x11, 0x11, 0x13);
+            t.row_alt = c(0x18, 0x18, 0x1b);
+            t.tl_bg = c(0x09, 0x09, 0x0b);
+            t.tl_ruler_bg = c(0x11, 0x11, 0x13);
+            t.switch_well = c(0x09, 0x09, 0x0b);
+            t.expr_bg = c(0x09, 0x09, 0x0b);
+        }
+        let [hover, hot, mark, fill] = accent_shades(&t, accent);
+        t.accent = accent;
+        t.accent_hover = hover;
+        t.focus = hover;
+        t.hot_text = hot;
+        t.timecode = hot;
+        t.cti = mark;
+        t.keyframe_selected = mark;
+        t.row_selected = fill;
+        t.fx_header_active = fill;
+        t.radius = 12.0;
+        t.radius_sm = 4.0;
+        t.gradients = false;
+        t
+    }
 }
 
 static INTER_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");

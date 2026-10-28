@@ -29,6 +29,24 @@ pub fn is_hidden(id: &str) -> bool {
     HIDDEN.get().is_some_and(|h| h.iter().any(|x| x == id))
 }
 
+/// Evora (KIN-FK-B2, Q-K19 (a)): the keyboard shortcut preset the host installs and keeps active
+/// (Evora's "Kinetika" profile, no single-key shortcut by default). While it is set, the
+/// keyboard shortcut editor doesn't offer upstream's built-in preset, and doesn't delete, rename
+/// or reset the host's profile (a member's own keys go in it, or in a duplicate). Set once by the
+/// host at start; `None` otherwise.
+static HOST_KEYMAP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Evora (KIN-FK-B2): the host's keyboard shortcut preset (see [`HOST_KEYMAP`]); only the first
+/// call counts.
+pub fn host_keymap(name: &str) {
+    let _ = HOST_KEYMAP.set(name.to_string());
+}
+
+/// Evora (KIN-FK-B2): the host's keyboard shortcut preset, if it installed one.
+pub fn host_keymap_name() -> Option<&'static str> {
+    HOST_KEYMAP.get().map(String::as_str)
+}
+
 pub struct UiCommand {
     pub id: &'static str,
     pub label: &'static str,
@@ -1693,6 +1711,57 @@ pub fn menu_items(app: &EffectcraftApp) -> Vec<MenuItem> {
             params: e.params.clone(),
         })
         .collect()
+}
+
+/// Evora (KIN-FK-B2, `command.catalog`): a menu entry the host shows, as the menu bar draws it:
+/// its label and its submenu path translated, with the display-name overrides (E9).
+#[derive(Clone, Debug)]
+pub struct CatalogEntry {
+    pub command: String,
+    /// Parameters bound to the entry (`null` = none).
+    pub params: Value,
+    pub label: String,
+    pub path: Vec<String>,
+    pub enabled: bool,
+}
+
+/// Evora (KIN-FK-B2, `command.catalog`): every entry of the menu bar, in its order, with the path
+/// the menu bar draws; what the host hides and the dynamic menus (recent files, history...) are left
+/// out. The host bridge builds Evora's command catalog from it.
+pub fn catalog_entries(app: &EffectcraftApp) -> Vec<CatalogEntry> {
+    fn walk(app: &EffectcraftApp, nodes: &[MenuNode], path: &mut Vec<String>, out: &mut Vec<CatalogEntry>) {
+        for n in nodes {
+            match n {
+                MenuNode::Item(e) if !is_hidden(&e.command) => out.push(CatalogEntry {
+                    command: e.command.clone(),
+                    params: e.params.clone(),
+                    label: entry_label(app, e),
+                    path: path.clone(),
+                    enabled: entry_enabled(app, e),
+                }),
+                MenuNode::Submenu { label, children } => {
+                    let ws = app.ui.workspace.clone();
+                    let shown = crate::i18n::effect_category(children, label).unwrap_or_else(|| {
+                        crate::i18n::submenu(app, label, effectcraft_engine::menus::submenu_label(&app.session, label, &dyn_ctx(&ws, &[])))
+                    });
+                    path.push(crate::i18n::neutral_owned(shown));
+                    walk(app, children, path, out);
+                    path.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    // The panels' catalog follows the interface language at once (as `logic` sets it every pass):
+    // a catalog asked for right after a language change has every label in that language.
+    crate::i18n::set_current(crate::i18n::language(app));
+    let mut out = Vec::new();
+    for node in effectcraft_engine::menus::menu_bar() {
+        let MenuNode::Submenu { label, children } = node else { continue };
+        let mut path = vec![crate::i18n::neutral_owned(crate::i18n::label(app, "", label).to_string())];
+        walk(app, children, &mut path, &mut out);
+    }
+    out
 }
 
 /// Shortcut text in this OS's notation (`⇧⌘K` on macOS, `Ctrl+Shift+K` elsewhere).

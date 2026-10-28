@@ -29,13 +29,20 @@
 //! edits the copy, not after Save a Copy; with `doc.saved-ack` the project is saved only at
 //! `evora:saved {ok: true}`, [`output`]), `evora:lang`, `evora:theme`, `evora:purge`, and since
 //! the V1 bridge (lot KIN-FK-B1) `evora:file` and `evora:ack` (answers to the engine's
-//! `evora:pick`, `evora:need` and `evora:export`, [`media`], [`output`]). Sent: `evora:ready`,
+//! `evora:pick`, `evora:need` and `evora:export`, [`media`], [`output`]), and since lot KIN-FK-B2
+//! `evora:command` (a command of the catalog, [`commands`]) and `evora:font` (a font of the
+//! member's, [`fonts`]). Sent: `evora:ready`,
 //! `evora:ack`, `evora:dirty`, `evora:save` (Save, Save As and the answer to `evora:request-save`:
 //! the working project goes to the host, never to a download, even before the host opened a
 //! document), `evora:failed`, and since the V1 bridge `evora:export` (renders and exports, never a
 //! download), `evora:pick` (Import, Replace Footage, Open: Evora's picker, never the local file
 //! system), `evora:need` (a project's media the engine doesn't hold) and `evora:focus-out` (F6,
-//! [`focus`]).
+//! [`focus`]), and since lot KIN-FK-B2 `evora:commands` (the catalog of the commands Evora may
+//! run, after the answer to `evora:init` and after every `evora:lang`, [`commands`]).
+//!
+//! Lot KIN-FK-B2 also gives Evora's editor its look and keys: the E2-KIN palette with the accent of
+//! `evora:init` and `evora:theme` (`effectcraft_ui_egui::theme::set_host_accent`, [`look`]) and
+//! the « Kinetika » keyboard shortcut profile, without single-key shortcuts ([`keys`]).
 //!
 //! `evora:purge` (§7.7 a) stops every writer first, for good (the store's flushes and session
 //! snapshots, the disk cache, the frame and job workers), then deletes the engine's browser stores
@@ -57,14 +64,24 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::persist::{storage_configure, storage_purge};
 
+/// Evora (KIN-FK-B2): the catalog of the commands Evora may run (`command.catalog`, `command`).
+mod commands;
 /// Evora (KIN-FK-B1): the keyboard's way out of the engine (`ui.focus-out`).
 mod focus;
+/// Evora (KIN-FK-B2, E6): the member's fonts (`font.inject`), on the page and in the workers.
+mod fonts;
+/// Evora (KIN-FK-B2): the keyboard shortcut profile of Evora's editor.
+mod keys;
+/// Evora (KIN-FK-B2, E2-KIN): the palette the editor shows, reported for the CI bench.
+mod look;
 /// Evora (KIN-04, KIN-05): Evora's picker and the project's media (`pick.drive`, `media.need`).
 mod media;
 /// Evora (KIN-03, KIN-06): exports to Evora's Drive and the acknowledged save (`export.drive`,
 /// `doc.saved-ack`).
 mod output;
 
+pub(crate) use fonts::{injected as injected_fonts, is_font_path, worker_font};
+pub(crate) use look::report as report_theme;
 pub(crate) use media::{dialog, pick_files, pick_open_project};
 pub(crate) use output::export;
 
@@ -73,9 +90,10 @@ const APP: &str = "kinetika";
 const EHP: &str = "1.0";
 /// What this engine honours (§9.1), each exercised by the CI's « pont-ehp » smoke test. Since the
 /// V1 bridge (lot KIN-FK-B1): `doc.saved-ack`, `export.drive`, `pick.drive`, `media.need` and
-/// `ui.focus-out` (A-19). Not yet: `media.ranges`, `command`, `command.catalog`, `font.inject`,
-/// `author`, `doc.multi`.
-const CAPABILITIES: [&str; 13] = [
+/// `ui.focus-out` (A-19); since lot KIN-FK-B2: `command` and `command.catalog` (the catalog of
+/// the commands Evora may run, [`commands`]) and `font.inject` (the member's fonts, [`fonts`]).
+/// Not yet: `media.ranges`, `author`, `doc.multi`.
+const CAPABILITIES: [&str; 16] = [
     "doc.open",
     "doc.save",
     "doc.saved-ack",
@@ -89,6 +107,9 @@ const CAPABILITIES: [&str; 13] = [
     "live.lang",
     "live.theme",
     "ui.focus-out",
+    "command",
+    "command.catalog",
+    "font.inject",
 ];
 /// Declared too when the host framed the engine in upstream's memory mode (`?storage=memory`):
 /// nothing persists in browser storage.
@@ -165,6 +186,8 @@ pub struct Boot {
     /// The engine's catalog code (`None`: English; the host shows its banner).
     pub lang: Option<&'static str>,
     pub dark: bool,
+    /// Evora (KIN-FK-B2, E2-KIN): the accent of `evora:init` (`#RRGGBB`).
+    pub accent: egui::Color32,
     /// `disk.diskCacheEnabled` as the host imposes it, if it does.
     pub disk_cache: Option<bool>,
 }
@@ -371,6 +394,8 @@ pub async fn prepare_storage(ns: String, persistent: bool, purge: bool) {
 pub fn apply_init(session: &mut effectcraft_engine::Session, boot: &Boot) {
     session.prefs.general.language = boot.lang.unwrap_or("en").to_string();
     session.prefs.appearance.appearance_mode = if boot.dark { "dark" } else { "light" }.to_string();
+    // Evora (KIN-FK-B2, E2-KIN): Evora's palette, with the accent of `evora:init`.
+    effectcraft_ui_egui::theme::set_host_accent(boot.accent);
     if let Some(on) = boot.disk_cache {
         session.prefs.disk.disk_cache_enabled = on;
     }
@@ -383,6 +408,24 @@ pub fn init_applied() {
     if let Some(id) = st.init_id.as_deref() {
         ack(&st, id, true, None);
     }
+    drop(st);
+    // Evora (KIN-FK-B2): the catalog of the commands Evora may run, after the answer.
+    crate::post(|app| announce(app));
+}
+
+/// Evora (KIN-FK-B2): `evora:commands` (`command.catalog` effective), the catalog in the engine's
+/// language, without `re` and without answer.
+fn announce(app: &EffectcraftApp) {
+    let Some(state) = bridge() else { return };
+    if !state.borrow().has("command.catalog") {
+        return;
+    }
+    let lang = app.session.prefs.general.language.clone();
+    let lang = if is_lang_tag(&lang) { lang } else { "en".to_string() };
+    let catalog = commands::payload(app, &lang);
+    let Ok(payload) = js_sys::JSON::parse(&catalog.to_string()) else { return };
+    let Ok(st) = state.try_borrow() else { return };
+    let _ = send(&st, "evora:commands", None, payload.unchecked_ref::<js_sys::Object>(), None);
 }
 
 /// The editor couldn't start: `evora:failed {code}` (§4.4; the host words the message).
@@ -459,6 +502,8 @@ pub fn install_host_hooks(app: &mut EffectcraftApp) {
     app.hooks.pick_folder = None;
     app.hooks.file_dialog_async = Some(Box::new(dialog));
     effectcraft_ui_egui::menus::hide_commands(HIDDEN_COMMANDS);
+    // Evora (KIN-FK-B2): the « Kinetika » keyboard shortcut profile, active.
+    keys::install(&mut app.session);
 }
 
 /// A save dialog named `path` for a file that isn't a project (`media::dialog`): written, it goes
@@ -634,6 +679,9 @@ fn receive(state: &Rc<RefCell<State>>, event: &web_sys::MessageEvent) {
         "evora:lang" => (Some("live.lang"), false),
         "evora:theme" => (Some("live.theme"), false),
         "evora:purge" => (Some("storage.purge"), false),
+        // Evora (KIN-FK-B2): a command of the catalog, a font of the member's.
+        "evora:command" => (Some("command"), false),
+        "evora:font" => (Some("font.inject"), false),
         // Answers to the engine's `evora:pick`, `evora:need` and `evora:export` (their capability is
         // checked against the request they answer, [`media`], [`output`]).
         "evora:file" => (None, true),
@@ -685,6 +733,8 @@ fn receive(state: &Rc<RefCell<State>>, event: &web_sys::MessageEvent) {
         "evora:lang" => on_lang(&id, &payload),
         "evora:theme" => on_theme(&id, &payload),
         "evora:purge" => on_purge(state, &id, &payload),
+        "evora:command" => on_command(state, &id, &payload),
+        "evora:font" => fonts::on_font(state, &id, &payload),
         "evora:file" => media::on_file(state, re.as_deref(), &payload),
         "evora:ack" => on_ack(state, re.as_deref(), &payload),
         _ => {}
@@ -735,7 +785,8 @@ fn on_init(state: &Rc<RefCell<State>>, id: &str, re: Option<&str>, p: &JsValue) 
         Some("light") => false,
         _ => return,
     };
-    let accent_ok = get(p, "accent").as_string().is_some_and(|a| is_accent(&a));
+    let accent = get(p, "accent").as_string().and_then(|a| parse_accent(&a));
+    let accent_ok = accent.is_some();
     let read_only_ok = get(p, "readOnly").as_bool().is_some();
     let ns = get(p, "storageNs").as_string().filter(|ns| is_storage_ns(ns));
     let display_name = get(p, "displayName");
@@ -754,7 +805,7 @@ fn on_init(state: &Rc<RefCell<State>>, id: &str, re: Option<&str>, p: &JsValue) 
     let limits_ok = plain_object(&limits)
         && only_keys(&limits, &["maxDocumentBytes", "maxExportBytes"])
         && [max_document, max_export].iter().all(|m| m.is_some_and(|m| m >= 1.0 && m.fract() == 0.0));
-    let (Some(engine_lang), Some(ns), Some(caps), Some(max_document)) = (engine_lang, ns, caps, max_document) else {
+    let (Some(engine_lang), Some(ns), Some(caps), Some(max_document), Some(accent)) = (engine_lang, ns, caps, max_document, accent) else {
         return;
     };
     if !(lang_ok && accent_ok && read_only_ok && display_name_ok && caps_ok && prefs_ok && limits_ok) {
@@ -770,7 +821,7 @@ fn on_init(state: &Rc<RefCell<State>>, id: &str, re: Option<&str>, p: &JsValue) 
     let purge = st.has("storage.purge");
     let lang = engine_lang.as_deref().and_then(crate::evora_language);
     let disk_cache = get(&prefs, PREF_DISK_CACHE).as_bool();
-    st.boot = Some(Boot { storage_ns, purge, lang, dark, disk_cache });
+    st.boot = Some(Boot { storage_ns, purge, lang, dark, accent, disk_cache });
     if let Some(resolve) = st.init_waiter.take() {
         let _ = resolve.call0(&JsValue::NULL);
     }
@@ -995,6 +1046,8 @@ fn on_lang(id: &str, p: &JsValue) {
         app.session.prefs.general.language = lang.unwrap_or("en").to_string();
         app.session.prefs_changed();
         answer(&id, true, None);
+        // Evora (KIN-FK-B2): the catalog again, in the new language (same ids, same hash).
+        announce(app);
     });
 }
 
@@ -1004,12 +1057,13 @@ fn on_theme(id: &str, p: &JsValue) {
         Some("light") => false,
         _ => return,
     };
-    if !only_keys(p, &["theme", "accent"]) || !get(p, "accent").as_string().is_some_and(|a| is_accent(&a)) {
-        return;
-    }
+    let accent = get(p, "accent").as_string().and_then(|a| parse_accent(&a));
+    let Some(accent) = accent.filter(|_| only_keys(p, &["theme", "accent"])) else { return };
     let id = id.to_string();
     crate::post(move |app| {
-        // The accent is Evora's indigo already (patch E2); light or dark changes here, not saved.
+        // Evora (KIN-FK-B2, E2-KIN): Evora's palette with this accent; light or dark changes here,
+        // not saved.
+        effectcraft_ui_egui::theme::set_host_accent(accent);
         app.session.prefs.appearance.appearance_mode = if dark { "dark" } else { "light" }.to_string();
         app.session.prefs_changed();
         // Applied now (a drawn frame would apply it too, but none comes while the iframe isn't
@@ -1202,9 +1256,47 @@ fn is_storage_ns(ns: &str) -> bool {
     ns.len() == 64 && ns.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// `accent` of §4.2: `#RRGGBB`.
-fn is_accent(a: &str) -> bool {
-    a.len() == 7 && a.starts_with('#') && a.chars().skip(1).all(|c| c.is_ascii_hexdigit())
+/// `accent` of §4.2: `#RRGGBB`, as a colour.
+fn parse_accent(a: &str) -> Option<egui::Color32> {
+    if !(a.len() == 7 && a.starts_with('#') && a.chars().skip(1).all(|c| c.is_ascii_hexdigit())) {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&a[i..i + 2], 16).ok();
+    Some(egui::Color32::from_rgb(byte(1)?, byte(3)?, byte(5)?))
+}
+
+/// Evora (KIN-FK-B2): `evora:command` (`command` effective): `{command, params}`, and `confirmed`
+/// with `command.catalog`. A command of the catalog runs on the UI thread ([`commands::run`]);
+/// without the catalog the engine runs none (`capability`).
+fn on_command(state: &Rc<RefCell<State>>, id: &str, p: &JsValue) {
+    let st = state.borrow();
+    let catalog = st.has("command.catalog");
+    let allowed: &[&str] = if catalog { &["command", "params", "confirmed"] } else { &["command", "params"] };
+    if !only_keys(p, allowed) {
+        return;
+    }
+    let Some(command) = get(p, "command").as_string().filter(|c| commands::is_command_id(c)) else { return };
+    let params = get(p, "params");
+    if !plain_object(&params) {
+        return;
+    }
+    let confirmed = get(p, "confirmed");
+    let confirmed = if confirmed.is_undefined() {
+        false
+    } else {
+        match confirmed.as_bool() {
+            Some(c) => c,
+            None => return,
+        }
+    };
+    if !catalog {
+        ack(&st, id, false, Some("capability"));
+        return;
+    }
+    let has_params = js_sys::Object::keys(params.unchecked_ref::<js_sys::Object>()).length() > 0;
+    drop(st);
+    let id = id.to_string();
+    crate::post(move |app| commands::run(app, &id, &command, has_params, confirmed));
 }
 
 /// `name` of §4.2: 1 to 255 characters, no `/`, `\` or control character.
