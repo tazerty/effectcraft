@@ -96,7 +96,7 @@ fn pump() {
     for f in actions {
         f(&mut web.app);
     }
-    crate::ehp::dirty(web.app.session.is_dirty());
+    crate::ehp::dirty(&mut web.app.session);
 }
 
 /// Ask for a UI frame.
@@ -157,10 +157,15 @@ impl eframe::App for WebApp {
         if crate::ehp::hosted() {
             self.app.apply_prefs(ctx);
         }
-        // Files dropped on the page: read them, then open/import.
+        // Files dropped on the page: read them, then open/import. Evora (KIN-01): not in the host
+        // bridge, where files come from Evora (File ▸ Import).
         let dropped: Vec<web_sys::File> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.web_file().cloned()).collect());
         if !dropped.is_empty() {
-            files::read_files(dropped, |paths| post(move |app| open_or_import(app, paths)));
+            if crate::ehp::hosted() {
+                self.app.ui.status = "Files come from Evora here: use File ▸ Import.".to_string();
+            } else {
+                files::read_files(dropped, |paths| post(move |app| open_or_import(app, paths)));
+            }
         }
         self.app.logic(ctx, frame);
         api::poll_replies();
@@ -171,12 +176,13 @@ impl eframe::App for WebApp {
             persist::snapshot(&self.app.session, ctx.input(|i| i.time), 1.0);
         }
         // Evora (E4): the host hears when its document becomes modified or saved (`evora:dirty`).
-        crate::ehp::dirty(self.app.session.is_dirty());
+        crate::ehp::dirty(&mut self.app.session);
         api::set_info("gpu", json!({"compositor": self.app.gpu_adapter(), "viewerOnGpu": self.app.viewer_on_gpu()}));
         api::set_info("frameWorkers", frames::stats());
         // Settings ▸ Disk ▸ Disk Cache (frames in the Origin Private File System).
         let d = &self.app.session.prefs.disk;
-        diskcache::configure(d.disk_cache_enabled, d.disk_cache_max_gb, storage::quota());
+        // Evora (KIN-02): no disk cache in the host bridge, whatever the setting.
+        diskcache::configure(d.disk_cache_enabled && !crate::ehp::hosted(), d.disk_cache_max_gb, storage::quota());
         api::set_info("diskCache", diskcache::stats());
     }
 
@@ -316,6 +322,11 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     let host = query_value("host").as_deref() == Some("evora");
     let memory = query_value("storage").as_deref() == Some("memory");
     let boot = if host { crate::ehp::boot(memory).await } else { None };
+    // Evora (KIN-01): with an admitted parent, the editor only shows the host's document: no last
+    // session, no demo, no home screen, no recovery offer (`?empty`), no Media Browser folders.
+    let hosted = boot.is_some();
+    let empty = empty || hosted;
+    let home = home && !hosted;
     if host {
         let ns = boot.as_ref().and_then(|b| b.storage_ns.clone()).unwrap_or_default();
         let purge = boot.as_ref().is_some_and(|b| b.purge);
@@ -333,9 +344,12 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     };
     api::set_info("storage", json!({"backend": persist::backend(), "entries": stored, "loadMs": js_sys::Date::now() - t0}));
     audio::install_unlock();
-    browse::restore();
-    // Evora (E4): no disk cache folder when the host turns the cache off (`evora:init.prefs`).
-    if boot.as_ref().and_then(|b| b.disk_cache) != Some(false) {
+    if !hosted {
+        browse::restore();
+    }
+    // Evora (E4, KIN-02): no disk cache folder in the host bridge, nor when the host turns the
+    // cache off (`evora:init.prefs`).
+    if !hosted && boot.as_ref().and_then(|b| b.disk_cache) != Some(false) {
         diskcache::init();
     }
     storage::refresh();
@@ -396,10 +410,15 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 let mut app = EffectcraftApp::new(session);
                 app.set_gpu_failure_bridge(gpu_failures);
                 app.ui.start_screen = home;
-                if let Some(r) = recovery.filter(|r| !restored && r.autosave.is_some()) {
+                // Evora (KIN-01): no recovery offer in the host bridge (the host's document only).
+                if let Some(r) = recovery.filter(|r| !restored && !hosted && r.autosave.is_some()) {
                     app.offer_recovery(r);
                 }
                 install_hooks(&mut app);
+                // Evora (KIN-01, KIN-04): Evora's picker and the hidden menu entries.
+                if hosted {
+                    crate::ehp::install_host_hooks(&mut app);
+                }
                 // Viewer frames render in frame workers (`?frameworkers=N`, 0 or `?noworkers`:
                 // on the page's thread), each on its own WebGPU device where the browser has
                 // WebGPU in workers (`?nogpuworkers`: their CPU).

@@ -82,8 +82,12 @@ fn mime(name: &str) -> &'static str {
     }
 }
 
-/// Offer `data` as a download named `name`.
+/// Offer `data` as a download named `name`. Evora (KIN-03): never in the host bridge (exports go
+/// to Evora's Drive, `crate::ehp::export`).
 pub fn download(name: &str, data: &[u8]) -> Result<(), JsValue> {
+    if crate::ehp::hosted() {
+        return Err(JsValue::from_str("no download in the Evora editor"));
+    }
     let doc = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(data));
     let bag = web_sys::BlobPropertyBag::new();
@@ -129,8 +133,14 @@ impl Services for WebServices {
         if !quiet && !crate::is_worker() {
             match crate::ehp::write(path, data) {
                 crate::ehp::HostWrite::NotHost => {}
-                crate::ehp::HostWrite::Sent => {
+                crate::ehp::HostWrite::Sent | crate::ehp::HostWrite::Kept => {
                     put(path, data.into());
+                    return Ok(());
+                }
+                // Evora (KIN-03): an export the user named goes to Evora's Drive with the frame's
+                // other outputs (`flush_downloads`).
+                crate::ehp::HostWrite::Output => {
+                    add_output(path, data.into());
                     return Ok(());
                 }
                 crate::ehp::HostWrite::Refused(why) => return Err(std::io::Error::other(why)),
@@ -200,13 +210,21 @@ pub fn flush_downloads() {
     let mut out: Vec<(String, Arc<[u8]>)> = paths.into_iter().filter_map(|p| get(&p).map(|d| (file_name(&p).to_string(), d))).collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out.dedup_by(|a, b| a.0 == b.0);
+    // Evora (KIN-03): in the host bridge the outputs go to Evora's Drive (`evora:export`), several
+    // as one stored `.zip`, never to a download.
+    if crate::ehp::hosted() {
+        match out.len() {
+            0 => {}
+            1 => crate::ehp::export(&out[0].0, out[0].1.to_vec()),
+            _ => crate::ehp::export(&format!("{}.zip", zip_stem(&out[0].0)), zip_store(&out)),
+        }
+        return;
+    }
     let r = match out.len() {
         0 => return,
         1 => download(&out[0].0, &out[0].1),
         n => {
-            let first = &out[0].0;
-            let stem = first.rsplit_once('.').map_or(first.as_str(), |(s, _)| s).trim_end_matches(|c: char| c.is_ascii_digit() || c == '_');
-            let stem = if stem.is_empty() { "render" } else { stem };
+            let stem = zip_stem(&out[0].0);
             log::info!("render: {n} files → {stem}.zip");
             download(&format!("{stem}.zip"), &zip_store(&out))
         }
@@ -214,6 +232,12 @@ pub fn flush_downloads() {
     if let Err(e) = r {
         log::warn!("download failed: {e:?}");
     }
+}
+
+/// The `.zip` name of several outputs: the first one's stem without its frame number.
+fn zip_stem(first: &str) -> String {
+    let stem = first.rsplit_once('.').map_or(first, |(s, _)| s).trim_end_matches(|c: char| c.is_ascii_digit() || c == '_');
+    if stem.is_empty() { "render".to_string() } else { stem.to_string() }
 }
 
 /// A `.zip` with the files stored uncompressed (PKWARE APPNOTE 6.3: local headers, central

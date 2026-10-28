@@ -97,25 +97,34 @@ function doomed(mode, ns) {
   return ns === "" || ns !== STORAGE_NS;
 }
 
+/// Evora (KIN-02): "cache" (`evora:init`, the bridge has no disk cache) deletes the disk cache
+/// folders (every kind under them: frames, layers, mattes), of any namespace or of none; the other
+/// modes go by namespace (`doomed`).
+function doomedName(mode, name) {
+  const ns = storeNs(name);
+  if (mode === "cache") return ns !== null && (name === "effectcraft-cache" || name.endsWith("--effectcraft-cache"));
+  return doomed(mode, ns);
+}
+
 /// The engine's stores a purge in `mode` would delete: [{kind: "opfs"|"idb"|"ls", name}].
 async function doomedStores(mode) {
   const out = [];
   try {
     if (navigator.storage && navigator.storage.getDirectory) {
       const root = await navigator.storage.getDirectory();
-      for await (const [name] of root.entries()) if (doomed(mode, storeNs(name))) out.push({ kind: "opfs", name });
+      for await (const [name] of root.entries()) if (doomedName(mode, name)) out.push({ kind: "opfs", name });
     }
   } catch (e) { console.info(`storage purge (OPFS): ${e.message ?? e}`); }
   try {
     if (self.indexedDB && indexedDB.databases) {
-      for (const { name } of await indexedDB.databases()) if (name && doomed(mode, storeNs(name))) out.push({ kind: "idb", name });
+      for (const { name } of await indexedDB.databases()) if (name && mode !== "cache" && doomed(mode, storeNs(name))) out.push({ kind: "idb", name });
     }
   } catch (e) { console.info(`storage purge (IndexedDB): ${e.message ?? e}`); }
   try {
     if (self.localStorage) {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        if (k && doomed(mode, keyNs(k))) out.push({ kind: "ls", name: k });
+        if (k && mode !== "cache" && doomed(mode, keyNs(k))) out.push({ kind: "ls", name: k });
       }
     }
   } catch (e) { console.info(`storage purge (localStorage): ${e.message ?? e}`); }

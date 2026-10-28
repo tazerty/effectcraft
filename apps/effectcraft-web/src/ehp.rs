@@ -26,11 +26,16 @@
 //!
 //! Handled: `evora:init`, `evora:open` (bytes, or a new document), `evora:request-save`,
 //! `evora:saved` (correlated; after a Save As the engine adopts the new `docRef` once its session
-//! edits the copy, not after Save a Copy; without `doc.saved-ack` the engine keeps upstream's saved
-//! state and the host shows its own, §6.3), `evora:lang`, `evora:theme`, `evora:purge`. Sent:
-//! `evora:ready`, `evora:ack`, `evora:dirty`, `evora:save` (Save, Save As and the answer to
-//! `evora:request-save`: the working project goes to the host, never to a download, even before
-//! the host opened a document) and `evora:failed`.
+//! edits the copy, not after Save a Copy; with `doc.saved-ack` the project is saved only at
+//! `evora:saved {ok: true}`, [`output`]), `evora:lang`, `evora:theme`, `evora:purge`, and since
+//! the V1 bridge (lot KIN-FK-B1) `evora:file` and `evora:ack` (answers to the engine's
+//! `evora:pick`, `evora:need` and `evora:export`, [`media`], [`output`]). Sent: `evora:ready`,
+//! `evora:ack`, `evora:dirty`, `evora:save` (Save, Save As and the answer to `evora:request-save`:
+//! the working project goes to the host, never to a download, even before the host opened a
+//! document), `evora:failed`, and since the V1 bridge `evora:export` (renders and exports, never a
+//! download), `evora:pick` (Import, Replace Footage, Open: Evora's picker, never the local file
+//! system), `evora:need` (a project's media the engine doesn't hold) and `evora:focus-out` (F6,
+//! [`focus`]).
 //!
 //! `evora:purge` (§7.7 a) stops every writer first, for good (the store's flushes and session
 //! snapshots, the disk cache, the frame and job workers), then deletes the engine's browser stores
@@ -52,21 +57,38 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::persist::{storage_configure, storage_purge};
 
+/// Evora (KIN-FK-B1): the keyboard's way out of the engine (`ui.focus-out`).
+mod focus;
+/// Evora (KIN-04, KIN-05): Evora's picker and the project's media (`pick.drive`, `media.need`).
+mod media;
+/// Evora (KIN-03, KIN-06): exports to Evora's Drive and the acknowledged save (`export.drive`,
+/// `doc.saved-ack`).
+mod output;
+
+pub(crate) use media::{dialog, pick_files, pick_open_project};
+pub(crate) use output::export;
+
 /// Build slug and protocol version announced in `evora:ready` (§4.4, §10).
 const APP: &str = "kinetika";
 const EHP: &str = "1.0";
-/// What this engine honours (§9.1), each exercised by the CI's « pont-ehp » smoke test. Not yet:
-/// `doc.saved-ack`, `export.drive` (renders still download), `pick.drive`, `media.need`,
-/// `media.ranges`, `command`, `font.inject`, `author`, `doc.multi`.
-const CAPABILITIES: [&str; 8] = [
+/// What this engine honours (§9.1), each exercised by the CI's « pont-ehp » smoke test. Since the
+/// V1 bridge (lot KIN-FK-B1): `doc.saved-ack`, `export.drive`, `pick.drive`, `media.need` and
+/// `ui.focus-out` (A-19). Not yet: `media.ranges`, `command`, `command.catalog`, `font.inject`,
+/// `author`, `doc.multi`.
+const CAPABILITIES: [&str; 13] = [
     "doc.open",
     "doc.save",
+    "doc.saved-ack",
     "doc.dirty",
     "doc.request-save",
+    "export.drive",
+    "pick.drive",
+    "media.need",
     "storage.ns",
     "storage.purge",
     "live.lang",
     "live.theme",
+    "ui.focus-out",
 ];
 /// Declared too when the host framed the engine in upstream's memory mode (`?storage=memory`):
 /// nothing persists in browser storage.
@@ -74,7 +96,9 @@ const MEMORY_CAPABILITY: &str = "storage.memory";
 /// The admitted parent origins, beside `index.html` (§2.3).
 const CONFIG: &str = "evora-host.json";
 const LANGS: [&str; 14] = ["ar", "de", "en", "es", "fr", "hi", "id", "it", "ja", "ko", "pt", "ru", "tr", "zh-Hans"];
-const CAPABILITY_NAMES: [&str; 18] = [
+/// The capabilities an `evora:init` may name: the host's ceiling (`host-schema.js` in Evora,
+/// `CAPABILITIES`, campaign « suite créative V1 »).
+const CAPABILITY_NAMES: [&str; 23] = [
     "doc.open",
     "doc.save",
     "doc.saved-ack",
@@ -93,6 +117,11 @@ const CAPABILITY_NAMES: [&str; 18] = [
     "live.theme",
     "font.inject",
     "author",
+    "ui.focus-out",
+    "ui.activity",
+    "drop.files",
+    "prefs.sync",
+    "command.catalog",
 ];
 const REASONS: [&str; 5] = ["autosave", "visibility", "close", "logout", "user"];
 const ACK_CODES: [&str; 16] = [
@@ -153,6 +182,9 @@ struct PendingSave {
     path: String,
     name: String,
     save_as: bool,
+    /// With `doc.saved-ack`: the saved state the save command set, held until the host's answer
+    /// ([`output::hold`]); `None` until the frame after the save.
+    held: Option<output::Held>,
 }
 
 struct State {
@@ -179,6 +211,18 @@ struct State {
     last_dirty: Option<bool>,
     purging: bool,
     seen: Vec<String>,
+    /// `limits.maxExportBytes` of `evora:init`.
+    max_export: f64,
+    /// `evora:pick` and `evora:need` awaiting their closing `evora:ack` ([`media`]).
+    picks: Vec<media::Pick>,
+    needs: Vec<media::Need>,
+    /// `evora:export` awaiting the host's `evora:ack` ([`output`]).
+    exports: Vec<String>,
+    /// Paths a save dialog named for a file that isn't a project (an export the user asked for):
+    /// written, they go to Evora's Drive ([`write`]).
+    export_paths: Vec<String>,
+    /// The missing footage the Project panel has selected (Replace Footage relinks it, `relink`).
+    relink_for: Option<String>,
 }
 
 impl State {
@@ -254,6 +298,12 @@ pub async fn boot(memory: bool) -> Option<Boot> {
         last_dirty: None,
         purging: false,
         seen: Vec::new(),
+        max_export: 0.0,
+        picks: Vec::new(),
+        needs: Vec::new(),
+        exports: Vec::new(),
+        export_paths: Vec::new(),
+        relink_for: None,
     }));
     let listener = state.clone();
     let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
@@ -268,6 +318,7 @@ pub async fn boot(memory: bool) -> Option<Boot> {
     let init = js_sys::Promise::new(&mut |resolve, _reject| waiter = Some(resolve));
     state.borrow_mut().init_waiter = waiter;
     BRIDGE.with(|b| *b.borrow_mut() = Some(state.clone()));
+    focus::listen();
     let capabilities = js_sys::Array::new();
     for c in declared {
         capabilities.push(&JsValue::from_str(c));
@@ -303,6 +354,17 @@ pub async fn prepare_storage(ns: String, persistent: bool, purge: bool) {
         }
         Err(e) => log::warn!("Evora host bridge: deleting the other accounts' stores failed: {e:?}"),
     }
+    // Evora (KIN-02): the disk cache is off in the bridge, whatever the setting: this account's
+    // cache folder goes too (every kind: frames, layers, mattes), before any worker could write.
+    match JsFuture::from(storage_purge("cache", false)).await {
+        Ok(r) => {
+            let left = remaining(&r);
+            if left > 0 {
+                log::warn!("Evora host bridge: {left} disk cache folder(s) couldn't be deleted");
+            }
+        }
+        Err(e) => log::warn!("Evora host bridge: deleting the disk cache failed: {e:?}"),
+    }
 }
 
 /// What `evora:init` imposes on the session before the first frame (not saved).
@@ -334,8 +396,12 @@ pub fn failed(error: &JsValue) {
     }
 }
 
-/// `evora:dirty` when the host's document becomes modified or saved (called every frame).
-pub fn dirty(now: bool) {
+/// `evora:dirty` when the host's document becomes modified or saved (called every frame). With
+/// `doc.saved-ack`, a save the host hasn't acknowledged doesn't count as saved ([`output::hold`]).
+pub fn dirty(session: &mut effectcraft_engine::Session) {
+    output::hold(session);
+    media::track_selection(session);
+    let now = session.is_dirty();
     let Some(state) = bridge() else { return };
     let Ok(mut st) = state.try_borrow_mut() else { return };
     if !st.has("doc.dirty") || st.last_dirty == Some(now) {
@@ -351,7 +417,65 @@ pub fn dirty(now: bool) {
     }
 }
 
-/// What became of a project file the engine writes (`Services::write_file`).
+/// Save-dialog paths remembered for an export, at most (older ones are forgotten).
+const EXPORT_PATHS_MAX: usize = 32;
+
+/// Evora (KIN-01): the menu commands hidden in the bridge, because they can't work in Evora's
+/// editor: another project than the host's document (new, demo, template, recent projects,
+/// closing it), the local file system (reveal, watch or relink a folder, collect files, install
+/// scripts or effect plug-ins, KIN-08) and external pages (E7 drops them).
+const HIDDEN_COMMANDS: &[&str] = &[
+    "file.newProject",
+    "file.openDemoProject",
+    "file.newFromTemplate",
+    "file.closeProject",
+    "file.openRecent",
+    "file.clearRecent",
+    "dynamic:recentProjects",
+    "file.revealInFinder",
+    "layer.revealInFinder",
+    "file.watchFolder",
+    "file.relinkFootage",
+    "file.collectFiles",
+    "file.installScript",
+    "file.installScriptUIPanel",
+    "effect.plugins.load",
+    "help.appPage",
+    "help.docs",
+    "help.github",
+    "help.onlineTutorials",
+    "help.reportIssue",
+    "help.revealLogFile",
+    "help.sibling",
+    "app.quit",
+];
+
+/// Evora (KIN-01, KIN-04): the editor in the bridge: Evora's picker in place of the browser's file
+/// pickers and the File System Access API, no folder dialog, and the menu entries that can't work
+/// in Evora hidden (`HIDDEN_COMMANDS`). Called once the app exists, with an admitted parent.
+pub fn install_host_hooks(app: &mut EffectcraftApp) {
+    app.hooks.pick_files = Some(Box::new(|exts: &[&str]| pick_files(exts)));
+    app.hooks.pick_open_project = Some(Box::new(pick_open_project));
+    app.hooks.pick_folder = None;
+    app.hooks.file_dialog_async = Some(Box::new(dialog));
+    effectcraft_ui_egui::menus::hide_commands(HIDDEN_COMMANDS);
+}
+
+/// A save dialog named `path` for a file that isn't a project (`media::dialog`): written, it goes
+/// to Evora's Drive ([`write`]).
+fn remember_export(path: &str) {
+    let Some(state) = bridge() else { return };
+    let Ok(mut st) = state.try_borrow_mut() else { return };
+    if st.export_paths.iter().any(|p| p == path) {
+        return;
+    }
+    if st.export_paths.len() >= EXPORT_PATHS_MAX {
+        st.export_paths.remove(0);
+    }
+    st.export_paths.push(path.to_string());
+}
+
+/// What became of a file the engine writes (`Services::write_file`).
 pub enum HostWrite {
     /// Not the bridge's: upstream's behaviour (a download).
     NotHost,
@@ -359,6 +483,11 @@ pub enum HostWrite {
     Sent,
     /// Neither sent nor downloaded.
     Refused(String),
+    /// Evora (KIN-03): an export the user named: a render output, sent as `evora:export` at the
+    /// end of the frame (`files::flush_downloads`).
+    Output,
+    /// Evora (KIN-03): a file the engine keeps for itself: in the table only.
+    Kept,
 }
 
 /// The engine writes `path`: with `doc.save`, a project file goes to the host as `evora:save`
@@ -368,8 +497,20 @@ pub fn write(path: &str, data: &[u8]) -> HostWrite {
     let Ok(mut st) = state.try_borrow_mut() else {
         return HostWrite::Refused("Evora is busy: try again".into());
     };
-    if !st.has("doc.save") || !path.to_ascii_lowercase().ends_with(PROJECT_EXT) {
-        return HostWrite::NotHost;
+    // Evora (KIN-03): in the bridge nothing goes to a download. A file a save dialog named (an
+    // export the user asked for: Lottie, a frame, a copy as XML…) goes to Evora's Drive
+    // (`evora:export`, at the end of the frame, with the frame's other outputs); any other file
+    // the engine writes for itself stays in the table.
+    if !path.to_ascii_lowercase().ends_with(PROJECT_EXT) {
+        if let Some(k) = st.export_paths.iter().position(|p| p == path) {
+            st.export_paths.remove(k);
+            return HostWrite::Output;
+        }
+        return HostWrite::Kept;
+    }
+    if !st.has("doc.save") {
+        st.refusal = Some("capability");
+        return HostWrite::Refused("this editor can't save to Evora".into());
     }
     // In the bridge a project never goes to a download, even before the host opened a document.
     let Some((doc_path, doc_ref, doc_name)) = st.current.as_ref().map(|d| (d.path.clone(), d.doc_ref.clone(), d.name.clone())) else {
@@ -403,7 +544,7 @@ pub fn write(path: &str, data: &[u8]) -> HostWrite {
     if st.pending_saves.len() >= PENDING_SAVES_MAX {
         st.pending_saves.remove(0);
     }
-    st.pending_saves.push(PendingSave { id, path: path.to_string(), name, save_as });
+    st.pending_saves.push(PendingSave { id, path: path.to_string(), name, save_as, held: None });
     if save_as {
         st.copies.push(path.to_string());
     }
@@ -493,6 +634,10 @@ fn receive(state: &Rc<RefCell<State>>, event: &web_sys::MessageEvent) {
         "evora:lang" => (Some("live.lang"), false),
         "evora:theme" => (Some("live.theme"), false),
         "evora:purge" => (Some("storage.purge"), false),
+        // Answers to the engine's `evora:pick`, `evora:need` and `evora:export` (their capability is
+        // checked against the request they answer, [`media`], [`output`]).
+        "evora:file" => (None, true),
+        "evora:ack" => (None, true),
         // Unknown here, or a capability this engine doesn't declare: ignored (§4.1, §10).
         _ => return,
     };
@@ -540,8 +685,36 @@ fn receive(state: &Rc<RefCell<State>>, event: &web_sys::MessageEvent) {
         "evora:lang" => on_lang(&id, &payload),
         "evora:theme" => on_theme(&id, &payload),
         "evora:purge" => on_purge(state, &id, &payload),
+        "evora:file" => media::on_file(state, re.as_deref(), &payload),
+        "evora:ack" => on_ack(state, re.as_deref(), &payload),
         _ => {}
     }
+}
+
+/// `evora:ack` from the host (§4.5): the end of an `evora:pick` or an `evora:need`, or the
+/// answer to an `evora:export`. Any other `re` is ignored.
+fn on_ack(state: &Rc<RefCell<State>>, re: Option<&str>, p: &JsValue) {
+    let Some(re) = re else { return };
+    if !only_keys(p, &["ok", "code", "result"]) {
+        return;
+    }
+    let Some(ok) = get(p, "ok").as_bool() else { return };
+    let code = get(p, "code");
+    let code = if code.is_undefined() {
+        None
+    } else {
+        match code.as_string().filter(|c| ACK_CODES.contains(&c.as_str())) {
+            Some(c) => Some(c),
+            None => return,
+        }
+    };
+    if !ok && code.is_none() {
+        return;
+    }
+    if media::on_ack(state, re, ok) {
+        return;
+    }
+    output::on_ack(state, re, ok, code);
 }
 
 fn on_init(state: &Rc<RefCell<State>>, id: &str, re: Option<&str>, p: &JsValue) {
@@ -591,6 +764,7 @@ fn on_init(state: &Rc<RefCell<State>>, id: &str, re: Option<&str>, p: &JsValue) 
     let declared = st.declared.clone();
     st.caps = caps.into_iter().filter(|c| declared.contains(&c.as_str())).collect();
     st.max_document = max_document;
+    st.max_export = max_export.unwrap_or(0.0);
     st.init_id = Some(id.to_string());
     let storage_ns = st.has("storage.ns").then_some(ns);
     let purge = st.has("storage.purge");
@@ -669,6 +843,8 @@ fn open_document(app: &mut EffectcraftApp, id: String, doc_ref: String, name: St
             st.current = Some(HostDoc { path, doc_ref, name });
             st.copies.clear();
             st.reply_to = None;
+            // A save of the previous document no longer decides this one's saved state.
+            st.pending_saves.clear();
             // The next frame tells the host whether it is modified (`evora:dirty`, §7.1 step 8).
             st.last_dirty = None;
             ack(&st, &id, true, None);
@@ -676,8 +852,13 @@ fn open_document(app: &mut EffectcraftApp, id: String, doc_ref: String, name: St
         Err(e) => {
             app.ui.status = format!("This document couldn't be opened: {e}");
             ack(&st, &id, false, Some("invalid_content"));
+            return;
         }
     }
+    drop(st);
+    // Evora (KIN-05): the media the project refers to and the engine doesn't hold come from Evora
+    // (`evora:need`), then the footage is checked again.
+    media::request_missing(app);
 }
 
 fn on_request_save(id: &str, p: &JsValue) {
@@ -756,17 +937,29 @@ fn on_saved(state: &Rc<RefCell<State>>, re: Option<&str>, p: &JsValue) {
     if !valid {
         return;
     }
-    let save = st.pending_saves.remove(k);
-    if save.save_as {
-        st.copies.retain(|c| c != &save.path);
-        if let Some(new_ref) = doc_ref.as_string().filter(|_| ok) {
-            // §7.3: the copy is the host's document from now on, when the engine works on it (Save
-            // As moved the session to the copy's path; after Save a Copy it keeps the original).
-            crate::post(move |app| adopt_copy(app, save.path, new_ref, save.name));
-        }
+    let PendingSave { path, name, save_as, held, .. } = st.pending_saves.remove(k);
+    // With `doc.saved-ack` the project is saved only now, if the host says so (§4.3); without it
+    // the engine keeps upstream's saved state and the host shows its own (§6.3).
+    let acknowledged = st.has("doc.saved-ack");
+    let mut adopt = None;
+    if save_as {
+        st.copies.retain(|c| c != &path);
+        // §7.3: the copy is the host's document from now on, when the engine works on it (Save
+        // As moved the session to the copy's path; after Save a Copy it keeps the original).
+        adopt = doc_ref.as_string().filter(|_| ok).map(|new_ref| (path, new_ref, name));
     }
-    // Without `doc.saved-ack` the engine keeps upstream's saved state; the host shows its own
-    // (§6.3).
+    drop(st);
+    if adopt.is_none() && !acknowledged {
+        return;
+    }
+    crate::post(move |app| {
+        if let Some((path, new_ref, name)) = adopt {
+            adopt_copy(app, path, new_ref, name);
+        }
+        if acknowledged {
+            output::settle(&mut app.session, held, ok);
+        }
+    });
 }
 
 /// `evora:saved` of a Save As, on the UI thread: the copy becomes the host's document if the

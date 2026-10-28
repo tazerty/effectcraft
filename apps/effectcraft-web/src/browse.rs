@@ -208,6 +208,11 @@ impl Browser for WebBrowser {
     }
 
     fn actions(&self) -> Vec<(String, String)> {
+        // Evora (KIN-01): in the host bridge files come from Evora (File ▸ Import), never from the
+        // local file system: no Add Files, Upload Folder nor Open Folder.
+        if crate::ehp::hosted() {
+            return Vec::new();
+        }
         let mut v = vec![];
         if can_pick_folder() {
             v.push(("openFolder".to_string(), "Open Folder…".to_string()));
@@ -221,6 +226,10 @@ impl Browser for WebBrowser {
     }
 
     fn action(&self, id: &str) -> Result<Value, String> {
+        // Evora (KIN-01): see `actions`.
+        if crate::ehp::hosted() {
+            return Err("files come from Evora here: use File ▸ Import".into());
+        }
         match id {
             "openFolder" => {
                 if !can_pick_folder() {
