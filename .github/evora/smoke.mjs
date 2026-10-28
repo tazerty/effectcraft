@@ -598,7 +598,8 @@ async function runEhp(ectx, parentOrigin) {
   check(!own.includes(seededOwnCache), `[ehp-cache] cache disque du compte non vidé au démarrage (mattes compris) : ${JSON.stringify(own)}`);
   if (ehpMode === "memory") {
     check(r.backend === "memory", `[ehp] stockage du moteur ${r.backend} (attendu : memory)`);
-    const created = own.filter((x) => !seededOwn.includes(x));
+    // (the account's cache folder is judged by [ehp-cache])
+    const created = own.filter((x) => !seededOwn.includes(x) && x !== seededOwnCache);
     check(created.length === 0, `[ehp] le moteur a créé un magasin en mode mémoire : ${JSON.stringify(created)}`);
   } else {
     check(r.backend === "opfs", `[ehp] stockage du moteur ${r.backend} (attendu : opfs)`);
@@ -753,7 +754,7 @@ async function runEhp(ectx, parentOrigin) {
         const plain = !k("keydown"); k("keyup"); const shift = !k("keydown", { shiftKey: true }); k("keyup", { shiftKey: true });
         return { prevented: plain, shiftPrevented: shift }; })()`,
     );
-    s = await until("evora:focus-out après F6", (x) => x.log.some((m) => m.type === "evora:focus-out"), EHP_WAIT_MS);
+    s = await until("[ehp-focus] evora:focus-out après F6", (x) => x.log.some((m) => m.type === "evora:focus-out"), EHP_WAIT_MS);
     await sleep(500);
     const st = await state();
     const outs = st.log.filter((m) => m.type === "evora:focus-out");
@@ -766,12 +767,13 @@ async function runEhp(ectx, parentOrigin) {
   //     {dirty: false}, project.summary dirty); the next save, acknowledged, makes it saved.
   {
     await step("failNext");
-    await exec("comp.new", {});
+    // The mark before the edit: its evora:dirty may arrive before the next read of the log.
     s = await state();
     const mark = s.log.length ? s.log[s.log.length - 1].seq : 0;
+    await exec("comp.new", {});
     s = await until("evora:dirty {dirty: true} avant l'enregistrement refusé", (x) => x.log.some((m) => m.seq > mark && m.type === "evora:dirty" && m.payload && m.payload.dirty === true));
     await step("sack1");
-    s = await until("evora:save en réponse à la demande refusée", (x) => x.saves.some((v) => v.re === x.ids.sack1));
+    s = await until("[ehp-sack] evora:save en réponse à la demande refusée", (x) => x.saves.some((v) => v.re === x.ids.sack1));
     if (s) {
       const v = s.saves.find((x) => x.re === s.ids.sack1);
       await sleep(EHP_SACK_SETTLE_MS);
@@ -783,7 +785,7 @@ async function runEhp(ectx, parentOrigin) {
       check(clean.length === 0 && sum && sum.dirty === true, `[ehp-sack] le moteur se dit enregistré après un accusé négatif : ${JSON.stringify({ clean, summary: sum })}`);
     }
     await step("sack2");
-    s = await until("evora:save en réponse à la seconde demande", (x) => x.saves.some((v) => v.re === x.ids.sack2));
+    s = await until("[ehp-sack] evora:save en réponse à la seconde demande", (x) => x.saves.some((v) => v.re === x.ids.sack2));
     if (s) {
       const v = s.saves.find((x) => x.re === s.ids.sack2);
       const after = await until("[ehp-sack] evora:dirty {dirty: false} après un accusé positif", (x) => x.log.some((m) => m.type === "evora:dirty" && m.payload && m.payload.dirty === false && m.seq > v.seq));
@@ -800,9 +802,9 @@ async function runEhp(ectx, parentOrigin) {
     const current = (await state()).ids.copy || (await state()).ids.doc;
     await exec("comp.new", { name: "Rendu", width: 64, height: 64, duration: 0.1 });
     const frame = await requestWith("ui.menu.invoke", { command: "comp.saveFrameAs" });
-    s = await until("evora:export du rendu d'image", (x) => x.exports.some((e) => e.name === "Frame.png"), EHP_V1_WAIT_MS);
+    s = await until("[ehp-export] evora:export du rendu d'image", (x) => x.exports.some((e) => e.name === "Frame.png"), EHP_V1_WAIT_MS);
     const lottie = await requestWith("ui.menu.invoke", { command: "file.exportLottie" });
-    s = await until("evora:export du Lottie", (x) => x.exports.some((e) => e.name === "Animation.json"), EHP_V1_WAIT_MS);
+    s = await until("[ehp-export] evora:export du Lottie", (x) => x.exports.some((e) => e.name === "Animation.json"), EHP_V1_WAIT_MS);
     const st = await state();
     const png = st.exports.find((e) => e.name === "Frame.png");
     const json = st.exports.find((e) => e.name === "Animation.json");
@@ -837,7 +839,7 @@ async function runEhp(ectx, parentOrigin) {
     note("footage after import", check1);
     check(!!check1 && check1.checked === 2 && check1.missing === 0, `[ehp-pick] les deux images choisies dans Evora ne sont pas devenues des métrages : ${JSON.stringify(check1)}`);
     await step("mediaSave");
-    s = await until("evora:save du projet et de ses médias", (x) => x.saves.some((v) => v.re === x.ids.mediaSave));
+    s = await until("[ehp-need] evora:save du projet et de ses médias", (x) => x.saves.some((v) => v.re === x.ids.mediaSave));
     const reopened = await step("reopen");
     s = await until("[ehp-need] accusé de la réouverture", (x) => !!x.ids.reopen && answersTo(x, x.ids.reopen).length > 0);
     s = await until("[ehp-need] evora:need des médias du projet rouvert", (x) => x.needs.length > 0, EHP_V1_WAIT_MS);
@@ -869,7 +871,11 @@ async function runEhp(ectx, parentOrigin) {
     check(keepers(afterPurge), `[ehp] témoins étrangers au moteur effacés par la purge : ${JSON.stringify(afterPurge)}`);
     // An edit after the purge (snapshot, flush, cache): no store may come back, and the engine
     // may not even try to write (a store already listed after the answer is « non vide » above).
+    // Since the V1 bridge the host mode keeps no session snapshot (KIN-01): a save puts the project
+    // in the engine's file table, which a writer still running would flush to browser storage.
     await exec("comp.new", {});
+    await step("afterPurgeSave");
+    await until("evora:save après evora:purge", (x) => x.saves.some((v) => v.re === x.ids.afterPurgeSave));
     await sleep(EHP_REWRITE_WAIT_MS);
     // Passes of the engine after that wait (a session snapshot is due at most a second after a
     // change): three requests, each answered by a later pass than the one before.

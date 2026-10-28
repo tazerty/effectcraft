@@ -239,6 +239,7 @@ S.step = {
   sack1: () => request("sack1", "evora:request-save", { reason: "user", docRef: S.ids.doc3 || S.ids.copy || S.ids.doc }),
   sack2: () => request("sack2", "evora:request-save", { reason: "user", docRef: S.ids.doc3 || S.ids.copy || S.ids.doc }),
   mediaSave: () => request("mediaSave", "evora:request-save", { reason: "user", docRef: S.ids.doc3 || S.ids.copy || S.ids.doc }),
+  afterPurgeSave: () => request("afterPurgeSave", "evora:request-save", { reason: "user", docRef: S.ids.doc3 || S.ids.copy || S.ids.doc }),
   // The project saved with its two imported media, reopened as another document whose media sit
   // under other Drive uids (U2): the engine has none of them and must ask (evora:need).
   reopen() {
