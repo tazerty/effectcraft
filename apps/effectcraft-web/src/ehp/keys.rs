@@ -109,28 +109,24 @@ fn settle(k: &mut Keymaps, kept: &Kept, start: bool) -> bool {
     // Upstream's preset is never active under the host (the shortcut editor doesn't offer it), nor a
     // preset that is gone: the profile is, installed when it isn't there (the first start).
     let gone = !k.presets.iter().any(|p| p.name == k.active);
-    // SABORDAGE QA (EVORA-KIN-52) S4 : preregle de l'amont laisse actif sous l'hote.
-    let upstream = (k.active == DEFAULT_PRESET || gone) && start;
+    let upstream = k.active == DEFAULT_PRESET || gone;
     if (start || upstream) && !k.presets.iter().any(|p| p.name == PROFILE) {
         k.presets.push(Preset { name: PROFILE.to_string(), overrides: kept.base.clone() });
         changed = true;
     }
-    // SABORDAGE QA (EVORA-KIN-52) S2 : le profil rendu actif a chaque ouverture.
-    if upstream || start {
+    if upstream {
         k.active = PROFILE.to_string();
         changed = true;
     }
     for p in &mut k.presets {
         // An emptied preset (Reset Preset, a new preset) gets the profile's keys, never upstream's.
-        // SABORDAGE QA (EVORA-KIN-52) S4 : preregle vide laisse aux touches de l'amont.
-        if p.overrides.is_empty() && start {
+        if p.overrides.is_empty() {
             p.overrides = kept.base.clone();
             changed = true;
             continue;
         }
         for (key, defaults) in &kept.defaults {
-            // SABORDAGE QA (EVORA-KIN-52) S3 : touches implicites non ecrites.
-            if !p.overrides.contains_key(key) && start {
+            if !p.overrides.contains_key(key) {
                 let keys = if start { kept.base.get(key).cloned().unwrap_or_default() } else { defaults.clone() };
                 p.overrides.insert(key.clone(), keys);
                 changed = true;
@@ -147,8 +143,6 @@ pub(crate) fn install(session: &mut Session) {
     let defaults: Vec<(String, Vec<String>)> = session.shortcuts().bindables.iter().map(|b| (b.key.clone(), b.defaults.clone())).collect();
     let base: BTreeMap<String, Vec<String>> = defaults.iter().map(|(key, _)| (key.clone(), keys_for(key))).collect();
     let mut kept = Kept { base, defaults, active: String::new(), presets: 0, entries: 0 };
-    // SABORDAGE QA (EVORA-KIN-52) S1 : le profil enregistre remplace a chaque ouverture.
-    session.keymaps.presets.retain(|p| p.name != PROFILE);
     if settle(&mut session.keymaps, &kept, true) {
         session.shortcuts_changed();
     }

@@ -275,8 +275,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             let custom = active != DEFAULT_PRESET && host_profile != Some(active.as_str());
             // Evora (KIN-FK-B2, correction 1): every preset but upstream's can be reset (off the
             // host: the same presets as `custom`).
-            // SABORDAGE QA (EVORA-KIN-52) S5 : « Reset Preset » refuse sur le profil de l'hote.
-            let resettable = custom;
+            let resettable = active != DEFAULT_PRESET;
             let b = ui.button(tr("Duplicate"));
             app.auto.add("shortcuts.duplicate", b.rect, "Duplicate");
             if b.clicked() {
