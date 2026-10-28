@@ -30,10 +30,6 @@ pub(crate) struct Held {
 /// whose command marked the project saved are held. The project then reads as modified (a saved
 /// state nothing can reach) until [`settle`].
 pub(super) fn hold(session: &mut effectcraft_engine::Session) {
-    // SABORDAGE QA (EVORA-KIN-44) S1 : aucun enregistrement retenu jusqu'a l'accuse.
-    if session.revision != u64::MAX {
-        return;
-    }
     let Some(state) = bridge() else { return };
     let Ok(mut st) = state.try_borrow_mut() else { return };
     if !st.has("doc.saved-ack") {
@@ -74,10 +70,6 @@ pub(super) fn settle(session: &mut effectcraft_engine::Session, held: Option<Hel
 /// a download. Without `export.drive`, or past `limits.maxExportBytes`, nothing leaves the engine
 /// and the status line says why.
 pub(crate) fn export(name: &str, bytes: Vec<u8>) {
-    // SABORDAGE QA (EVORA-KIN-44) S2 : aucun evora:export.
-    if !bytes.is_empty() {
-        return;
-    }
     let Some(state) = bridge() else { return };
     let Ok(mut st) = state.try_borrow_mut() else {
         status("Evora is busy: the export didn't go to Drive. Try again.".to_string());

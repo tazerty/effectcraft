@@ -130,10 +130,6 @@ pub(crate) fn pick_open_project() -> Option<String> {
 
 /// `evora:pick {purpose: "import" | "relink"}`; `Err(then)` when it couldn't be sent.
 fn pick(exts: &[String], many: bool, for_path: Option<String>, then: Then) -> Result<(), Then> {
-    // SABORDAGE QA (EVORA-KIN-44) S4 : aucun evora:pick.
-    if !exts.is_empty() || many || for_path.is_some() {
-        return Err(then);
-    }
     let Some(state) = bridge() else { return Err(then) };
     let Ok(mut st) = state.try_borrow_mut() else { return Err(then) };
     if !st.has("pick.drive") {
@@ -184,10 +180,6 @@ fn accept_list(exts: &[String]) -> Vec<String> {
 /// After an `evora:open`: ask the host for the media the project refers to and the table doesn't
 /// hold (`media.need`, §7.5).
 pub(super) fn request_missing(app: &EffectcraftApp) {
-    // SABORDAGE QA (EVORA-KIN-44) S5 : aucun evora:need.
-    if !app.session.project.items.is_empty() || app.session.project.items.is_empty() {
-        return;
-    }
     let Some(state) = bridge() else { return };
     let Ok(mut st) = state.try_borrow_mut() else { return };
     if !st.has("media.need") {
