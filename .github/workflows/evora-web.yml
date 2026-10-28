@@ -511,11 +511,13 @@ jobs:
           # n'est pas le parent, evora:dirty absent après l'enregistrement, aucune réponse tant que le
           # cadre n'est pas peint, accusé d'evora:purge avant les effacements et écritures après lui.
           # Tolérés : ce que ces deux derniers sabordages entraînent (stockage encore là ou recréé,
-          # magasins effacés après l'accusé, erreurs de page des écritures refusées).
+          # magasins effacés après l'accusé, erreurs de page des écritures refusées) et, depuis le pont
+          # V1 (lot KIN-FK-B1), l'evora:dirty {dirty: false} que le témoin retient après un accusé
+          # positif ([ehp-sack], même sabordage que l'enregistrement de l'étape 6).
           witness moteur "$smoke/ehp-temoin-moteur.out" --engine="http://127.0.0.1:$PW" --label=pont-ehp-temoin-moteur --out="$smoke" --ehp=opfs --ehp-ns="$ns" --ehp-url-ns="$urlns" \
             --parent="$(ehp_parent "http://127.0.0.1:$PW" "host=evora&nosw" '{}')" \
             --witness-require="[ehp] réponse à un message refusé (rogueSource)|[ehp] evora:dirty {dirty: false} après l'enregistrement : rien|[ehp] evora:save en réponse à evora:request-save, cadre masqué : rien|[ehp] accusé d'evora:purge envoyé avant la fin des suppressions|[ehp] écriture du moteur après evora:purge" \
-            --witness-tolerate="[ehp] stockage du moteur non vide après evora:purge|[ehp] le moteur a recréé un magasin après evora:purge|[ehp] magasins du compte non supprimés avant l'accusé|erreur(s) de page"
+            --witness-tolerate="[ehp] stockage du moteur non vide après evora:purge|[ehp] le moteur a recréé un magasin après evora:purge|[ehp] magasins du compte non supprimés avant l'accusé|erreur(s) de page|[ehp-sack] evora:dirty {dirty: false} après un accusé positif|[ehp-sack] le moteur reste modifié après un accusé positif"
           # Témoin de perte du périphérique graphique (EVORA-KIN-25) : tout périphérique WebGPU de la
           # page est détruit dès sa création ; le banc doit rougir sur le périphérique perdu (motif
           # « Destroyed ») et sur l'écran vide. Une perte du runner peut porter le même motif (run

@@ -78,6 +78,8 @@ const errors = [];
 const warnings = [];
 const logs = [];
 const issues = [];
+// KIN-03: the browser's downloads (Browser.downloadWillBegin), refused by Chrome all the same.
+const downloads = [];
 const contexts = new Map();
 const sessions = new Map();
 const report = { label, parentUrl, engineOrigin, ok: false };
@@ -208,6 +210,10 @@ function onEvent(msg) {
       else if (e.level === "warning") warnings.push(line);
       break;
     }
+    case "Browser.downloadWillBegin":
+    case "Page.downloadWillBegin":
+      downloads.push({ method: msg.method, url: String(p.url || "").slice(0, 120), name: p.suggestedFilename || "" });
+      break;
     case "Audits.issueAdded":
       if (p.issue && p.issue.code === "ContentSecurityPolicyIssue") {
         issues.push(JSON.stringify(p.issue.details?.contentSecurityPolicyIssueDetails ?? p.issue));
@@ -355,10 +361,28 @@ async function judgeScreen(ctx) {
 
 // What the engine declares in evora:ready (src/ehp.rs), each capability exercised below;
 // `storage.memory` only when it was framed in the memory mode (`?storage=memory`).
-const EHP_CAPABILITIES = ["doc.open", "doc.save", "doc.dirty", "doc.request-save", "storage.ns", "storage.purge", "live.lang", "live.theme"];
+// Since the V1 bridge (lot KIN-FK-B1): doc.saved-ack, export.drive, pick.drive, media.need and
+// ui.focus-out, each with its checks below ([ehp-sack], [ehp-export], [ehp-pick], [ehp-need],
+// [ehp-focus]; [ehp-menus] and [ehp-cache] for the host mode of KIN-01 and KIN-02).
+const EHP_CAPABILITIES = [
+  "doc.open", "doc.save", "doc.saved-ack", "doc.dirty", "doc.request-save", "export.drive", "pick.drive", "media.need",
+  "storage.ns", "storage.purge", "live.lang", "live.theme", "ui.focus-out",
+];
 const EHP_EXPECTED = ehpMode === "memory" ? [...EHP_CAPABILITIES, "storage.memory"] : EHP_CAPABILITIES;
-const EHP_KNOWN = new Set([...EHP_CAPABILITIES, "storage.memory", "doc.saved-ack", "doc.multi", "export.drive", "media.need", "media.ranges", "pick.drive", "command", "font.inject", "author"]);
-const EHP_OUTBOUND = new Set(["evora:ready", "evora:failed", "evora:ack", "evora:dirty", "evora:save"]);
+const EHP_KNOWN = new Set([
+  ...EHP_CAPABILITIES, "storage.memory", "doc.multi", "media.ranges", "command", "font.inject", "author", "ui.activity", "drop.files", "prefs.sync", "command.catalog",
+]);
+const EHP_OUTBOUND = new Set(["evora:ready", "evora:failed", "evora:ack", "evora:dirty", "evora:save", "evora:export", "evora:pick", "evora:need", "evora:focus-out"]);
+// Menu commands the engine hides in the bridge (src/ehp.rs HIDDEN_COMMANDS: a sample) and others it
+// keeps (the premise: the list is the engine's own).
+const EHP_HIDDEN = ["file.newProject", "file.openDemoProject", "file.revealInFinder", "file.watchFolder", "effect.plugins.load", "help.github"];
+const EHP_SHOWN = ["file.import", "file.save", "file.saveAs", "file.exportLottie", "comp.saveFrameAs"];
+// After an evora:saved {ok: false}, how long the bench waits for an evora:dirty {dirty: false}
+// that must not come (doc.saved-ack).
+const EHP_SACK_SETTLE_MS = 2500;
+// The exports, picks and needs of the V1 bridge (a render of three frames on the runner's software
+// GPU included).
+const EHP_V1_WAIT_MS = 90000;
 const EHP_WAIT_MS = 30000;
 const EHP_READY_WAIT_MS = 20000;
 const EHP_ROGUE_SETTLE_MS = 1500;
@@ -429,6 +453,14 @@ const PURGE_HOOKS = `(() => { const log = (window.__evoraPurgeLog = []); const w
   const si = Storage.prototype.setItem;
   Storage.prototype.setItem = function (k, v) { writes.push({ op: "ls:setItem", name: k, at: at() }); return si.call(this, k, v); };
   return true; })()`;
+// KIN-03: every download the engine's page starts (an anchor with `download` clicked, an object
+// URL handed to window.open), with the browser's own downloads (Browser.downloadWillBegin).
+const DOWNLOAD_HOOKS = `(() => { const log = (window.__evoraDownloadLog = []);
+  const click = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function (...a) { if (this.hasAttribute("download")) log.push({ op: "a.download", name: this.getAttribute("download") }); return click.apply(this, a); };
+  const open = window.open;
+  window.open = function (...a) { log.push({ op: "window.open", url: String(a[0]).slice(0, 80) }); return open.apply(this, a); };
+  return true; })()`;
 // Animation frames the engine's frame gets in about a second (none when the browser doesn't paint it).
 const RAF_COUNT = `new Promise((res) => { let n = 0; const t0 = performance.now();
   const tick = () => { n += 1; if (performance.now() - t0 < 1000) requestAnimationFrame(tick); }; requestAnimationFrame(tick);
@@ -438,11 +470,19 @@ async function runEhp(ectx, parentOrigin) {
   const r = (report.ehp = { mode: ehpMode, ns: ehpNs, urlNs: ehpUrlNs, steps: [] });
   const note = (k, v) => r.steps.push({ [k]: v });
   const state = async () =>
-    evalIn(parentCtx(parentOrigin), "JSON.parse(JSON.stringify({ log: __ehp.log, ids: __ehp.ids, harness: __ehp.harness, saves: __ehp.saves, acks: __ehp.acks }))");
+    evalIn(parentCtx(parentOrigin), "JSON.parse(JSON.stringify({ log: __ehp.log, ids: __ehp.ids, harness: __ehp.harness, saves: __ehp.saves, acks: __ehp.acks, exports: __ehp.exports, picks: __ehp.picks, needs: __ehp.needs }))");
   const step = (name) => evalIn(parentCtx(parentOrigin), `__ehp.step.${name}()`);
   const exec = (command, params) =>
     evalIn(ectx, `window.effectcraft.execute(${JSON.stringify(command)}, ${JSON.stringify(params || {})}).then((v) => JSON.parse(JSON.stringify(v ?? null)))`, true, 60000);
   const request = (method) => evalIn(ectx, `window.effectcraft.request(${JSON.stringify(method)}, {}).then((v) => JSON.parse(JSON.stringify(v ?? null)))`, true, 60000);
+  // A request with parameters, its failure as {rejected: message} (a refused command).
+  const requestWith = (method, params) =>
+    evalIn(
+      ectx,
+      `window.effectcraft.request(${JSON.stringify(method)}, ${JSON.stringify(params || {})}).then((v) => JSON.parse(JSON.stringify(v ?? null)), (e) => ({ rejected: String((e && e.message) || e) }))`,
+      true,
+      60000,
+    );
   const listing = () => evalIn(ectx, LISTING, true);
   const until = async (what, pred, ms = EHP_WAIT_MS) => {
     const end = Date.now() + ms;
@@ -467,7 +507,10 @@ async function runEhp(ectx, parentOrigin) {
     ls: [`evns-${EHP_OTHER_NS}--effectcraft`, "effectcraft-seed", `evns-${ehpNs}--effectcraft`, "evora-keep"],
   };
   // The account's own stores the seed page leaves (kept by evora:init, deleted by evora:purge).
-  const seededOwn = [`opfs:evns-${ehpNs}--effectcraft-cache`, `idb:evns-${ehpNs}--effectcraft-handles`, `ls:evns-${ehpNs}--effectcraft`];
+  // KIN-02: the account's disk cache folder (with its `v1/mattes/` entry) is not kept: the bridge
+  // has no disk cache, evora:init deletes it.
+  const seededOwn = [`idb:evns-${ehpNs}--effectcraft-handles`, `ls:evns-${ehpNs}--effectcraft`];
+  const seededOwnCache = `opfs:evns-${ehpNs}--effectcraft-cache`;
   const keepers = (l) => l.opfs.includes("evora-keep") && l.idb.includes("evora-keep") && l.ls.includes("evora-keep");
 
   // 1. The seed page saw its fixture (else a purge check would pass on nothing).
@@ -522,6 +565,7 @@ async function runEhp(ectx, parentOrigin) {
   s = await until("accusé d'evora:open", (x) => answersTo(x, x.ids.open).length > 0);
   if (!s) return;
   await evalIn(ectx, PURGE_HOOKS);
+  await evalIn(ectx, DOWNLOAD_HOOKS);
   const ready = s.log.filter((m) => m.type === "evora:ready");
   const rp = (ready[0] && ready[0].payload) || {};
   r.timing.ready = ready[0] ? Math.round(ready[0].at - navigatedAt) : null;
@@ -548,6 +592,10 @@ async function runEhp(ectx, parentOrigin) {
   const own = engineStores(afterInit).filter(([, , ns]) => ns === ehpNs).map(([k, n]) => `${k}:${n}`);
   const lostOwn = seededOwn.filter((x) => !own.includes(x));
   check(lostOwn.length === 0, `[ehp] magasins du même compte effacés au démarrage (ils doivent rester) : ${JSON.stringify(lostOwn)}`);
+  // KIN-02: the premise (the seed page left this account's cache folder, mattes included), then
+  // the folder gone once evora:init is applied.
+  check(!!(seed && seed.listing && seed.listing.opfs.includes(`evns-${ehpNs}--effectcraft-cache`)), `[ehp-cache] prémisse : cache disque du compte absent de l'amorçage : ${JSON.stringify(seed && seed.listing ? seed.listing.opfs : null)}`);
+  check(!own.includes(seededOwnCache), `[ehp-cache] cache disque du compte non vidé au démarrage (mattes compris) : ${JSON.stringify(own)}`);
   if (ehpMode === "memory") {
     check(r.backend === "memory", `[ehp] stockage du moteur ${r.backend} (attendu : memory)`);
     const created = own.filter((x) => !seededOwn.includes(x));
@@ -679,6 +727,133 @@ async function runEhp(ectx, parentOrigin) {
     }
   }
 
+  // 7b. KIN-01: the menu entries that can't work in Evora's editor are hidden, and refused.
+  {
+    const items = await request("ui.menu.list");
+    const ids = new Set((items || []).map((it) => String(it.id ?? "")));
+    const shown = EHP_HIDDEN.filter((c) => ids.has(c));
+    const missing = EHP_SHOWN.filter((c) => !ids.has(c));
+    note("menus", { listed: ids.size, shown, missing });
+    check(missing.length === 0, `[ehp-menus] prémisse : entrées attendues absentes des menus : ${JSON.stringify(missing)}`);
+    check(shown.length === 0, `[ehp-menus] entrées sans effet dans Evora encore affichées : ${JSON.stringify(shown)}`);
+    const before = await exec("project.summary");
+    const refused = await requestWith("ui.menu.invoke", { command: "file.openDemoProject" });
+    const after = await exec("project.summary");
+    note("menus invoke", { refused, before: before && before.path, after: after && after.path });
+    const isRefused = !!refused && (refused.rejected !== undefined || refused.ok === false);
+    check(isRefused && after && before && after.path === before.path, `[ehp-menus] commande masquée exécutée : ${JSON.stringify({ refused, before, after })}`);
+  }
+
+  // 7c. ui.focus-out: F6 in the engine goes back to the Evora page (evora:focus-out {}), once per
+  //     press, never with a modifier; the canvas and the browser don't get it.
+  {
+    const keys = await evalIn(
+      ectx,
+      `(() => { const k = (type, extra) => window.dispatchEvent(new KeyboardEvent(type, Object.assign({ key: "F6", code: "F6", bubbles: true, cancelable: true }, extra || {})));
+        const plain = !k("keydown"); k("keyup"); const shift = !k("keydown", { shiftKey: true }); k("keyup", { shiftKey: true });
+        return { prevented: plain, shiftPrevented: shift }; })()`,
+    );
+    s = await until("evora:focus-out après F6", (x) => x.log.some((m) => m.type === "evora:focus-out"), EHP_WAIT_MS);
+    await sleep(500);
+    const st = await state();
+    const outs = st.log.filter((m) => m.type === "evora:focus-out");
+    note("focus-out", { keys, count: outs.length });
+    check(!!s && outs.length === 1 && outs[0].re === null && outs[0].payload && Object.keys(outs[0].payload).length === 0, `[ehp-focus] evora:focus-out attendu une fois, sans charge ni re : ${JSON.stringify(outs)}`);
+    check(!!keys && keys.prevented === true && keys.shiftPrevented === false, `[ehp-focus] F6 non retenue (ou Maj+F6 retenue) : ${JSON.stringify(keys)}`);
+  }
+
+  // 7d. doc.saved-ack: an evora:saved {ok: false} leaves the engine modified (no evora:dirty
+  //     {dirty: false}, project.summary dirty); the next save, acknowledged, makes it saved.
+  {
+    await step("failNext");
+    await exec("comp.new", {});
+    s = await state();
+    const mark = s.log.length ? s.log[s.log.length - 1].seq : 0;
+    s = await until("evora:dirty {dirty: true} avant l'enregistrement refusé", (x) => x.log.some((m) => m.seq > mark && m.type === "evora:dirty" && m.payload && m.payload.dirty === true));
+    await step("sack1");
+    s = await until("evora:save en réponse à la demande refusée", (x) => x.saves.some((v) => v.re === x.ids.sack1));
+    if (s) {
+      const v = s.saves.find((x) => x.re === s.ids.sack1);
+      await sleep(EHP_SACK_SETTLE_MS);
+      const st = await state();
+      const clean = st.log.filter((m) => m.type === "evora:dirty" && m.payload && m.payload.dirty === false && m.seq > v.seq);
+      const sum = await exec("project.summary");
+      note("saved-ack refused", { answer: v.answer, clean: clean.length, dirty: sum && sum.dirty });
+      check(v.answer && v.answer.ok === false, `[ehp-sack] prémisse : le banc n'a pas refusé l'enregistrement : ${JSON.stringify(v.answer)}`);
+      check(clean.length === 0 && sum && sum.dirty === true, `[ehp-sack] le moteur se dit enregistré après un accusé négatif : ${JSON.stringify({ clean, summary: sum })}`);
+    }
+    await step("sack2");
+    s = await until("evora:save en réponse à la seconde demande", (x) => x.saves.some((v) => v.re === x.ids.sack2));
+    if (s) {
+      const v = s.saves.find((x) => x.re === s.ids.sack2);
+      const after = await until("[ehp-sack] evora:dirty {dirty: false} après un accusé positif", (x) => x.log.some((m) => m.type === "evora:dirty" && m.payload && m.payload.dirty === false && m.seq > v.seq));
+      const sum = await exec("project.summary");
+      note("saved-ack accepted", { answer: v.answer, dirty: sum && sum.dirty });
+      check(!!after && v.answer && v.answer.ok === true && sum && sum.dirty === false, `[ehp-sack] le moteur reste modifié après un accusé positif : ${JSON.stringify({ answer: v.answer, summary: sum })}`);
+    }
+  }
+
+  // 7e. export.drive: a frame render and a Lottie export, each named in the editor's save dialog,
+  //     and a render of three frames (an image sequence, one stored .zip) go to Evora's Drive as
+  //     evora:export, with the document's docRef; never a download.
+  {
+    const current = (await state()).ids.copy || (await state()).ids.doc;
+    await exec("comp.new", { name: "Rendu", width: 64, height: 64, duration: 0.1 });
+    const frame = await requestWith("ui.menu.invoke", { command: "comp.saveFrameAs" });
+    s = await until("evora:export du rendu d'image", (x) => x.exports.some((e) => e.name === "Frame.png"), EHP_V1_WAIT_MS);
+    const lottie = await requestWith("ui.menu.invoke", { command: "file.exportLottie" });
+    s = await until("evora:export du Lottie", (x) => x.exports.some((e) => e.name === "Animation.json"), EHP_V1_WAIT_MS);
+    const st = await state();
+    const png = st.exports.find((e) => e.name === "Frame.png");
+    const json = st.exports.find((e) => e.name === "Animation.json");
+    note("exports", { frame, lottie, png, json });
+    check(!!png && png.mime === "image/png" && png.arrayBuffer && png.byteLength > 0 && png.magic === "89504e47" && png.docRef === current, `[ehp-export] rendu d'image : evora:export attendu (PNG, docRef) : ${JSON.stringify({ frame, png })}`);
+    check(!!json && json.mime === "application/json" && json.arrayBuffer && json.byteLength > 0 && json.magic.startsWith("7b") && json.docRef === current, `[ehp-export] Lottie : evora:export attendu (JSON, docRef) : ${JSON.stringify({ lottie, json })}`);
+    const added = await exec("renderQueue.add", { format: "png" }).catch((e) => ({ error: String(e && e.message) }));
+    const rendered = await exec("renderQueue.render", { wait: true }).catch((e) => ({ error: String(e && e.message) }));
+    s = await until("[ehp-export-zip] evora:export du rendu de la file", (x) => x.exports.some((e) => /\.zip$/.test(String(e.name))), EHP_V1_WAIT_MS);
+    const zip = s ? s.exports.find((e) => /\.zip$/.test(String(e.name))) : null;
+    note("render queue", { added, rendered, zip });
+    check(!!zip && zip.mime === "application/zip" && zip.magic === "504b0304" && zip.byteLength > 0 && zip.docRef === current, `[ehp-export-zip] rendu de la file : un .zip attendu en evora:export : ${JSON.stringify({ added, rendered, zip })}`);
+    await sleep(1000);
+    const engineDownloads = await evalIn(ectx, "JSON.parse(JSON.stringify(window.__evoraDownloadLog || []))");
+    note("downloads", { engine: engineDownloads, browser: downloads });
+    check(engineDownloads.length === 0 && downloads.length === 0, `[ehp-export] téléchargement déclenché : ${JSON.stringify({ engine: engineDownloads, browser: downloads })}`);
+  }
+
+  // 7f. pick.drive and media.need: File ▸ Import opens Evora's picker (evora:pick), the two images
+  //     it answers become footage; the project saved with them, reopened as another document whose
+  //     media sit under other Drive uids, asks for them (evora:need) and comes back whole, without
+  //     the browser's storage.
+  {
+    const imported = await requestWith("ui.menu.invoke", { command: "file.import" });
+    s = await until("[ehp-pick] evora:pick d'un import", (x) => x.picks.length > 0, EHP_V1_WAIT_MS);
+    const pick = s ? s.picks[0] : null;
+    const pp = (pick && pick.payload) || {};
+    note("pick", { imported, pick });
+    check(!!pick && pp.purpose === "import" && pp.multiple === true && Array.isArray(pp.accept) && pp.accept.length >= 1 && pp.accept.length <= 32 && pp.accept.includes("image/*") && pp.forPath === undefined, `[ehp-pick] evora:pick inattendu : ${JSON.stringify(pick)}`);
+    await sleep(1500);
+    const check1 = await exec("footage.check", { wait: true }).catch((e) => ({ error: String(e && e.message) }));
+    note("footage after import", check1);
+    check(!!check1 && check1.checked === 2 && check1.missing === 0, `[ehp-pick] les deux images choisies dans Evora ne sont pas devenues des métrages : ${JSON.stringify(check1)}`);
+    await step("mediaSave");
+    s = await until("evora:save du projet et de ses médias", (x) => x.saves.some((v) => v.re === x.ids.mediaSave));
+    const reopened = await step("reopen");
+    s = await until("[ehp-need] accusé de la réouverture", (x) => !!x.ids.reopen && answersTo(x, x.ids.reopen).length > 0);
+    s = await until("[ehp-need] evora:need des médias du projet rouvert", (x) => x.needs.length > 0, EHP_V1_WAIT_MS);
+    const need = s ? s.needs[0] : null;
+    const np = (need && need.payload) || {};
+    const paths = Array.isArray(np.paths) ? [...np.paths].sort() : [];
+    note("need", { reopened, need });
+    check(reopened === true, `[ehp-need] prémisse : le projet enregistré ne porte pas les médias importés`);
+    check(!!need && np.docRef === s.ids.doc3 && JSON.stringify(paths) === JSON.stringify(["/evora/01JZMEDB0000000000000000BB/bleu.png", "/evora/01JZMEDB0000000000000000BB/rouge.png"]), `[ehp-need] evora:need inattendu : ${JSON.stringify(need)}`);
+    await sleep(2000);
+    const sum = await exec("project.summary");
+    const check2 = await exec("footage.check", { wait: true }).catch((e) => ({ error: String(e && e.message) }));
+    note("footage after need", { summary: sum && sum.path, check: check2 });
+    check(!!sum && sum.path === "/evora-medias.ecproj" && !!check2 && check2.checked === 2 && check2.missing === 0, `[ehp-need] le projet rouvert n'a pas retrouvé ses deux médias : ${JSON.stringify({ path: sum && sum.path, check: check2 })}`);
+  }
+
   // 8. evora:purge: answered after the stores are gone, nothing comes back afterwards.
   const beforePurge = await listing();
   r.beforePurge = beforePurge;
@@ -752,6 +927,8 @@ let exitCode = 1;
 try {
   const version = await send("Browser.getVersion");
   report.chrome = version.product;
+  // KIN-03: Chrome refuses every download and says so (Browser.downloadWillBegin).
+  await send("Browser.setDownloadBehavior", { behavior: "deny", eventsEnabled: true }).catch((e) => warnings.push(`Browser.setDownloadBehavior: ${e.message}`));
   await systemGpu();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: page } = await send("Target.attachToTarget", { targetId, flatten: true });

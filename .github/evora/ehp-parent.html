@@ -19,7 +19,10 @@
 // vérifie source et origine, journalise tout ce qui arrive, répond à evora:ready par un
 // evora:init de version 2 (doit rester sans réponse) puis par un evora:init valide, ouvre un
 // petit projet en octets, répond à chaque evora:save par un evora:saved ; le reste est piloté par
-// smoke.mjs (window.__ehp.step).
+// smoke.mjs (window.__ehp.step). Pont V1 (lot KIN-FK-B1) : la coquille répond aussi à evora:export
+// (accusé), à evora:pick (deux images sous /evora/<uid>/ pour un import, le fichier du chemin pour
+// une reliaison, « cancelled » pour une ouverture) et à evora:need (les images demandées, par leur
+// nom, puis l'accusé de clôture) ; elle peut refuser le prochain enregistrement (failNext).
 const q = new URLSearchParams(location.search);
 const ENGINE = q.get("engine");
 const ROGUE = q.get("rogue");
@@ -43,7 +46,16 @@ const PROJECT = JSON.stringify({
 // `seq` numbers every message the page receives, in the order it receives them: two messages the
 // engine posts in the same task often arrive in the same millisecond, so the order of evora:save
 // and evora:dirty is judged by `seq`, never by `at`.
-const S = (window.__ehp = { log: [], ids: {}, harness: [], saves: [], acks: {}, version: 1, seq: 0 });
+// Two small PNG images (4 × 4, red and blue) the Evora page « holds in Drive ».
+const MEDIA = {
+  "rouge.png": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGO4IycHRwzEcQDTIxGBFNCZswAAAABJRU5ErkJggg==",
+  "bleu.png": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGOQs7kDRwzEcQDsIxNhKYyREgAAAABJRU5ErkJggg==",
+};
+const mediaBytes = (name) => Uint8Array.from(atob(MEDIA[name]), (c) => c.charCodeAt(0)).buffer;
+// Drive uids of the imported media (U1) and of the same media under the reopened project (U2).
+const U1 = "01JZMEDA0000000000000000AA";
+const U2 = "01JZMEDB0000000000000000BB";
+const S = (window.__ehp = { log: [], ids: {}, harness: [], saves: [], acks: {}, version: 1, seq: 0, failNext: 0, exports: [], picks: [], needs: [], texts: {} });
 const engine = document.getElementById("engine");
 const rogueSource = document.getElementById("rogue-source");
 const rogueOrigin = document.getElementById("rogue-origin");
@@ -116,20 +128,61 @@ addEventListener("message", (e) => {
       arrayBuffer: p.bytes instanceof ArrayBuffer, byteLength: p.bytes instanceof ArrayBuffer ? p.bytes.byteLength : -1, items: null,
     };
     try {
-      entry.items = Object.keys(JSON.parse(new TextDecoder().decode(p.bytes)).items || {}).length;
+      const text = new TextDecoder().decode(p.bytes);
+      S.texts[d.id] = text;
+      entry.items = Object.keys(JSON.parse(text).items || {}).length;
     } catch (err) {
       entry.parseError = String(err);
     }
-    // The host's answer: a new version; a Save As is a new document (§7.3).
-    S.version += 1;
-    const answer = { ok: true, version: S.version };
-    if (p.saveAs === true) {
-      S.ids.copy = ulid();
-      answer.docRef = S.ids.copy;
+    // The host's answer: a new version; a Save As is a new document (§7.3). `failNext`: the next
+    // save is refused (doc.saved-ack: the engine must stay modified).
+    let answer;
+    if (S.failNext > 0) {
+      S.failNext -= 1;
+      answer = { ok: false, error: "server" };
+    } else {
+      S.version += 1;
+      answer = { ok: true, version: S.version };
+      if (p.saveAs === true) {
+        S.ids.copy = ulid();
+        answer.docRef = S.ids.copy;
+      }
     }
     entry.answer = answer;
     S.saves.push(entry);
     send({ v: 1, type: "evora:saved", id: ulid(), re: d.id, payload: answer });
+  } else if (d.type === "evora:export") {
+    // An export to Drive (§7.4): its name, type and first bytes, then the host's answer.
+    const bytes = p.bytes instanceof ArrayBuffer ? new Uint8Array(p.bytes) : null;
+    S.exports.push({
+      at, seq, id: d.id, docRef: p.docRef ?? null, name: p.name, mime: p.mime, arrayBuffer: !!bytes, byteLength: bytes ? bytes.byteLength : -1,
+      magic: bytes ? Array.from(bytes.slice(0, 4), (b) => b.toString(16).padStart(2, "0")).join("") : "",
+    });
+    send({ v: 1, type: "evora:ack", id: ulid(), re: d.id, payload: { ok: true } });
+  } else if (d.type === "evora:pick") {
+    // Evora's picker (§7.6): two images for an import, the file under its path for a relink, the
+    // document itself for an open (here: cancelled).
+    S.picks.push({ at, seq, id: d.id, payload: describe(p) });
+    const files = p.purpose === "import" ? ["rouge.png", "bleu.png"].map((n) => [`/evora/${U1}/${n}`, n]) : p.purpose === "relink" && p.forPath ? [[p.forPath, "rouge.png"]] : [];
+    for (const [path, name] of files) {
+      const bytes = mediaBytes(name);
+      send({ v: 1, type: "evora:file", id: ulid(), re: d.id, payload: { path, name, bytes } }, [bytes]);
+    }
+    send({ v: 1, type: "evora:ack", id: ulid(), re: d.id, payload: files.length ? { ok: true } : { ok: false, code: "cancelled" } });
+  } else if (d.type === "evora:need") {
+    // A project's media (§7.5): each path under U2 answered with the image of its name, any other
+    // with not_found, then the closing answer.
+    S.needs.push({ at, seq, id: d.id, payload: describe(p) });
+    for (const path of Array.isArray(p.paths) ? p.paths : []) {
+      const name = String(path).split("/").pop();
+      if (String(path).startsWith(`/evora/${U2}/`) && MEDIA[name]) {
+        const bytes = mediaBytes(name);
+        send({ v: 1, type: "evora:file", id: ulid(), re: d.id, payload: { path, name, bytes } }, [bytes]);
+      } else {
+        send({ v: 1, type: "evora:file", id: ulid(), re: d.id, payload: { path, error: "not_found" } });
+      }
+    }
+    send({ v: 1, type: "evora:ack", id: ulid(), re: d.id, payload: { ok: true } });
   }
 });
 
@@ -178,6 +231,26 @@ S.step = {
     return true;
   },
   live2: () => request("theme2", "evora:theme", { theme: "light", accent: "#4F46E5" }),
+  // doc.saved-ack: the next save refused, then saves answered again.
+  failNext() {
+    S.failNext = 1;
+    return true;
+  },
+  sack1: () => request("sack1", "evora:request-save", { reason: "user", docRef: S.ids.doc3 || S.ids.copy || S.ids.doc }),
+  sack2: () => request("sack2", "evora:request-save", { reason: "user", docRef: S.ids.doc3 || S.ids.copy || S.ids.doc }),
+  mediaSave: () => request("mediaSave", "evora:request-save", { reason: "user", docRef: S.ids.doc3 || S.ids.copy || S.ids.doc }),
+  // The project saved with its two imported media, reopened as another document whose media sit
+  // under other Drive uids (U2): the engine has none of them and must ask (evora:need).
+  reopen() {
+    const save = S.saves.find((v) => v.re === S.ids.mediaSave);
+    const text = save ? S.texts[save.id] : null;
+    if (!text || !text.includes(`/evora/${U1}/`)) return false;
+    const bytes = new TextEncoder().encode(text.split(`/evora/${U1}/`).join(`/evora/${U2}/`)).buffer;
+    S.ids.doc3 = ulid();
+    S.ids.reopen = ulid();
+    send({ v: 1, type: "evora:open", id: S.ids.reopen, payload: { docRef: S.ids.doc3, name: "evora-medias.ecproj", bytes } }, [bytes]);
+    return true;
+  },
   purge: () => request("purge", "evora:purge", { scope: "current" }),
 };
 
