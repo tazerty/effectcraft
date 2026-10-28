@@ -12,6 +12,23 @@ use crate::dock::PanelKind;
 use crate::state::{Resolution, Tool};
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
 
+/// Evora (KIN-01, patch LUM-09 pattern): the commands a host hides because they can't work in it
+/// (the Evora editor: no local file system, no other project than the host's document, no
+/// external page). Set once by the host at start; empty otherwise. A hidden entry is left out of
+/// the menu bar, the context menus that reuse it and `ui.menu.list`, and [`invoke`] refuses it
+/// (shortcut, command palette). A dynamic menu is named `dynamic:<name>`.
+static HIDDEN: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Evora (KIN-01): hide these commands (see [`HIDDEN`]); only the first call counts.
+pub fn hide_commands(ids: &[&str]) {
+    let _ = HIDDEN.set(ids.iter().map(|s| s.to_string()).collect());
+}
+
+/// Evora (KIN-01): whether the host hides `id`.
+pub fn is_hidden(id: &str) -> bool {
+    HIDDEN.get().is_some_and(|h| h.iter().any(|x| x == id))
+}
+
 pub struct UiCommand {
     pub id: &'static str,
     pub label: &'static str,
@@ -310,6 +327,10 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    // Evora (KIN-01): a command the host hides is not available there (shortcut, palette).
+    if is_hidden(id) {
+        return Err(format!("{id} is not available in this editor"));
+    }
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
@@ -1660,6 +1681,8 @@ pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
 pub fn menu_items(app: &EffectcraftApp) -> Vec<MenuItem> {
     effectcraft_engine::menus::entries()
         .into_iter()
+        // Evora (KIN-01): what the host hides isn't listed.
+        .filter(|(_, e)| !is_hidden(&e.command))
         .map(|(path, e)| MenuItem {
             id: e.command.clone(),
             label: entry_label(app, e),
@@ -2205,6 +2228,8 @@ fn menu_nodes(
             MenuNode::Separator => {
                 ui.separator();
             }
+            // Evora (KIN-01): a dynamic menu the host hides (`dynamic:<name>`).
+            MenuNode::Dynamic { name } if is_hidden(&format!("dynamic:{name}")) => {}
             MenuNode::Dynamic { name } => {
                 // Recent projects / footage / presets, undo history, shortcut slots, viewers,
                 // saved workspaces.
@@ -2260,6 +2285,8 @@ fn menu_nodes(
                     nav.opened(depth, &response);
                 }
             }
+            // Evora (KIN-01): an entry the host hides.
+            MenuNode::Item(e) if is_hidden(&e.command) => {}
             MenuNode::Item(e) => {
                 let r = browse_hover(nav, menu_entry(app, ui, e));
                 nav.entry(ui, depth, &r, false);
